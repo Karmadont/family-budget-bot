@@ -1,0 +1,22 @@
+# === Секреты — НИКОГДА не коммитим ===
+.env
+
+# === Данные семьи — тоже не коммитим ===
+data/
+*.sqlite3
+*.db
+*.csv
+
+# === Python ===
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# === IDE / OS ===
+.idea/
+.vscode/
+.DS_Store
