@@ -4,6 +4,7 @@ services.py — то, что между базой и телеграмом: пе
 """
 from __future__ import annotations
 
+import calendar
 import csv
 import datetime as dt
 import html
@@ -11,6 +12,7 @@ import io
 
 import config
 import db
+import usage as usage_mod
 
 TELEGRAM_LIMIT = 4000  # реальный лимит 4096, оставляем запас на теги
 
@@ -72,6 +74,43 @@ def esc(text: str | None) -> str:
     return html.escape(text or "", quote=False)
 
 
+def usd(value: float) -> str:
+    """Доллары с разумным числом знаков: $3.42 и $0.63, но $0.0021 для мелочи."""
+    if value >= 0.1:
+        return f"${value:,.2f}".replace(",", " ")
+    if value >= 0.001:
+        return f"${value:.4f}"
+    return f"${value:.5f}"
+
+
+def in_rubles(value_usd: float) -> str:
+    """Приписка с рублями, если в .env задан курс. Иначе пусто."""
+    if not config.USD_RATE:
+        return ""
+    return f" (~{round(value_usd * config.USD_RATE):,} ₽)".replace(",", " ")
+
+
+def plural(count: int, one: str, few: str, many: str) -> str:
+    """Русское склонение: 1 вызов, 2 вызова, 5 вызовов."""
+    tail = abs(count) % 100
+    if 11 <= tail <= 14:
+        return many
+    tail %= 10
+    if tail == 1:
+        return one
+    if 2 <= tail <= 4:
+        return few
+    return many
+
+
+def tokens(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.0f}K"
+    return str(count)
+
+
 def amount(item: db.Purchase) -> str:
     """'2 кг' или '' — количество позиции, если известно."""
     if item.quantity is None:
@@ -111,6 +150,46 @@ async def stats_report(chat_id: int, since: str, until: str, label: str) -> str:
         lines += [f"• {esc(name)} — {money(subtotal)}" for name, subtotal, _ in top]
 
     return "\n".join(lines)
+
+
+async def cost_report(chat_id: int, since: str, until: str, label: str) -> str:
+    """Сколько потрачено на Claude API за период."""
+    calls, tok_in, tok_out, total = await db.usage_totals(chat_id, since, until)
+    if not calls:
+        return f"За период <b>{esc(label)}</b> обращений к Claude не было."
+
+    lines = [
+        f"<b>Расходы на Claude {esc(label)}</b>",
+        f"Всего: <b>{usd(total)}</b>{in_rubles(total)} за {calls} "
+        f"{plural(calls, 'вызов', 'вызова', 'вызовов')}",
+        "",
+        "<b>По операциям</b>",
+    ]
+    for kind, cost, count in await db.usage_by("kind", chat_id, since, until):
+        name = usage_mod.KIND_LABELS.get(kind, kind)
+        lines.append(f"• {esc(name)} — {usd(cost)} ({count})")
+
+    by_model = await db.usage_by("model", chat_id, since, until)
+    if len(by_model) > 1:
+        lines += ["", "<b>По моделям</b>"]
+        lines += [f"• {esc(m)} — {usd(cost)} ({count})" for m, cost, count in by_model]
+
+    lines += ["", f"<i>Токенов: {tokens(tok_in)} вход / {tokens(tok_out)} выход</i>"]
+
+    forecast = _month_forecast(since, until, total)
+    if forecast is not None:
+        lines.append(f"<i>При таком темпе за месяц выйдет ~{usd(forecast)}{in_rubles(forecast)}</i>")
+
+    return "\n".join(lines)
+
+
+def _month_forecast(since: str, until: str, spent: float) -> float | None:
+    """Прогноз на конец месяца — только если смотрим текущий месяц с его начала."""
+    now = today()
+    if since != now.replace(day=1).isoformat() or until != now.isoformat():
+        return None
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    return spent / now.day * days_in_month
 
 
 async def fridge_report(chat_id: int) -> str:

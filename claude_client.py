@@ -21,6 +21,7 @@ from anthropic import AsyncAnthropic
 import config
 import prompts
 from models import PARSED_MESSAGE_SCHEMA, ParsedMessage
+from usage import KIND_ASK, KIND_PARSE, KIND_RECEIPT, KIND_RECIPE, Usage
 
 log = logging.getLogger(__name__)
 
@@ -71,12 +72,14 @@ def _fatal(exc: anthropic.APIStatusError) -> ClaudeError | None:
     return None
 
 
-async def parse_message(text: str, today: str) -> ParsedMessage:
+async def parse_message(text: str, today: str) -> tuple[ParsedMessage, Usage | None]:
     """
     Разобрать сообщение чата.
 
     Временные сбои проглатывает (вернёт is_purchase=False), а вот ошибки настройки
     бросает наружу — про них пользователь должен узнать сразу.
+
+    Вместе с результатом возвращает расход токенов (None, если вызов не состоялся).
     """
     try:
         response = await _client.messages.create(
@@ -90,12 +93,12 @@ async def parse_message(text: str, today: str) -> ParsedMessage:
         if fatal := _fatal(exc):
             raise fatal from exc
         log.exception("Claude не смог разобрать сообщение (%s)", exc.status_code)
-        return _NOT_A_PURCHASE
+        return _NOT_A_PURCHASE, None
     except anthropic.APIConnectionError:
         log.exception("Нет связи с Claude")
-        return _NOT_A_PURCHASE
+        return _NOT_A_PURCHASE, None
 
-    return _to_parsed(response)
+    return _to_parsed(response), Usage.of(response, KIND_PARSE)
 
 
 async def parse_receipt(
@@ -103,7 +106,7 @@ async def parse_receipt(
     media_type: str,
     caption: str | None,
     today: str,
-) -> ParsedMessage:
+) -> tuple[ParsedMessage, Usage]:
     """
     Прочитать фотографию чека.
 
@@ -152,7 +155,7 @@ async def parse_receipt(
     if response.stop_reason == "max_tokens":
         log.warning("Чек не поместился в ответ целиком")
 
-    return _to_parsed(response)
+    return _to_parsed(response), Usage.of(response, KIND_RECEIPT)
 
 
 def _to_parsed(response: anthropic.types.Message) -> ParsedMessage:
@@ -167,24 +170,26 @@ def _to_parsed(response: anthropic.types.Message) -> ParsedMessage:
         return _NOT_A_PURCHASE
 
 
-async def ask(question: str, context: str) -> str:
+async def ask(question: str, context: str) -> tuple[str, Usage]:
     """Свободный вопрос по данным о покупках."""
     return await _chat(
         system=prompts.ASSISTANT_SYSTEM,
         user=f"Данные о покупках семьи:\n\n{context}\n\n---\n\nВопрос: {question}",
+        kind=KIND_ASK,
     )
 
 
-async def suggest_recipes(fridge_text: str, wish: str | None) -> str:
+async def suggest_recipes(fridge_text: str, wish: str | None) -> tuple[str, Usage]:
     """Что приготовить из имеющегося."""
     wish_line = f"\n\nПожелание: {wish}" if wish else ""
     return await _chat(
         system=prompts.RECIPE_SYSTEM,
         user=f"Продукты, купленные недавно:\n\n{fridge_text}{wish_line}",
+        kind=KIND_RECIPE,
     )
 
 
-async def _chat(*, system: str, user: str) -> str:
+async def _chat(*, system: str, user: str, kind: str) -> tuple[str, Usage]:
     try:
         response = await _client.messages.create(
             model=config.CLAUDE_MODEL,
@@ -207,5 +212,5 @@ async def _chat(*, system: str, user: str) -> str:
     if response.stop_reason == "refusal":
         raise ClaudeError("Модель отказалась отвечать на этот вопрос.")
 
-    answer = _text_of(response)
-    return answer or "Мне нечего добавить по этим данным."
+    answer = _text_of(response) or "Мне нечего добавить по этим данным."
+    return answer, Usage.of(response, kind)

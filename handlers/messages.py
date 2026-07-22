@@ -98,13 +98,16 @@ async def on_text(message: Message) -> None:
         return
 
     try:
-        parsed = await claude_client.parse_message(text, services.today().isoformat())
+        parsed, spent = await claude_client.parse_message(text, services.today().isoformat())
     except claude_client.ClaudeError as exc:
         # Настройка сломана. Молчать нельзя — иначе бот просто «не работает»,
         # и непонятно почему. Но и на каждое сообщение отвечать не будем.
         if _may_warn(message.chat.id):
             await message.reply(str(exc))
         return
+
+    if spent is not None:
+        await db.log_usage(message.chat.id, spent)
 
     if not parsed.is_purchase or not parsed.items:
         return
@@ -165,12 +168,14 @@ async def on_photo(message: Message) -> None:
     log.info("Чек: %.0f КБ -> %.0f КБ после подготовки", len(raw) / 1024, len(prepared) / 1024)
 
     try:
-        parsed = await claude_client.parse_receipt(
+        parsed, spent = await claude_client.parse_receipt(
             prepared, media_type, message.caption, services.today().isoformat()
         )
     except claude_client.ClaudeError as exc:
         await status.edit_text(str(exc))
         return
+
+    await db.log_usage(message.chat.id, spent)
 
     if not parsed.is_purchase or not parsed.items:
         note = f"\n<i>{services.esc(parsed.note)}</i>" if parsed.note else ""

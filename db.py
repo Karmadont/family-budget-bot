@@ -13,6 +13,7 @@ import aiosqlite
 
 import config
 from models import ParsedMessage
+from usage import Usage
 
 _conn: aiosqlite.Connection | None = None
 
@@ -40,6 +41,24 @@ CREATE TABLE IF NOT EXISTS purchases (
 CREATE INDEX IF NOT EXISTS idx_purchases_chat_date ON purchases (chat_id, bought_at);
 CREATE INDEX IF NOT EXISTS idx_purchases_chat_cat  ON purchases (chat_id, category);
 CREATE INDEX IF NOT EXISTS idx_purchases_fridge    ON purchases (chat_id, is_food, consumed_at);
+
+-- Расход на Claude API. cost_usd храним посчитанным: цены меняются,
+-- и пересчитывать прошлое по новому прайсу было бы неверно.
+CREATE TABLE IF NOT EXISTS usage_log (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id            INTEGER NOT NULL,
+    at                 TEXT    NOT NULL,          -- ISO timestamp
+    day                TEXT    NOT NULL,          -- YYYY-MM-DD, для группировки
+    kind               TEXT    NOT NULL,          -- parse | receipt | ask | recipe
+    model              TEXT    NOT NULL,
+    input_tokens       INTEGER NOT NULL,
+    output_tokens      INTEGER NOT NULL,
+    cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd           REAL    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_chat_day ON usage_log (chat_id, day);
 """
 
 
@@ -255,6 +274,61 @@ async def recent(chat_id: int, limit: int) -> list[Purchase]:
         (chat_id, limit),
     )
     return [Purchase.from_row(r) for r in await cur.fetchall()]
+
+
+async def log_usage(chat_id: int, entry: Usage) -> None:
+    """Записать расход одного обращения к API."""
+    now = dt.datetime.now(config.TIMEZONE)
+    await _db().execute(
+        """
+        INSERT INTO usage_log
+            (chat_id, at, day, kind, model, input_tokens, output_tokens,
+             cache_read_tokens, cache_write_tokens, cost_usd)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            chat_id, now.isoformat(timespec="seconds"), now.date().isoformat(),
+            entry.kind, entry.model, entry.input_tokens, entry.output_tokens,
+            entry.cache_read_tokens, entry.cache_write_tokens, entry.cost_usd,
+        ),
+    )
+    await _db().commit()
+
+
+async def usage_totals(chat_id: int, since: str, until: str) -> tuple[int, int, int, float]:
+    """Итог за период. -> (вызовов, входных токенов, выходных, долларов)"""
+    cur = await _db().execute(
+        """
+        SELECT COUNT(*) AS calls,
+               COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_tokens), 0) AS tin,
+               COALESCE(SUM(output_tokens), 0) AS tout,
+               COALESCE(SUM(cost_usd), 0) AS cost
+        FROM usage_log
+        WHERE chat_id = ? AND day BETWEEN ? AND ?
+        """,
+        (chat_id, since, until),
+    )
+    row = await cur.fetchone()
+    return row["calls"], row["tin"], row["tout"], row["cost"]
+
+
+async def usage_by(
+    column: str, chat_id: int, since: str, until: str
+) -> list[tuple[str, float, int]]:
+    """Разбивка расхода по kind или model. -> [(значение, долларов, вызовов)]"""
+    if column not in ("kind", "model"):  # column идёт в SQL — только из белого списка
+        raise ValueError(f"нельзя группировать по {column!r}")
+    cur = await _db().execute(
+        f"""
+        SELECT {column} AS bucket, SUM(cost_usd) AS cost, COUNT(*) AS calls
+        FROM usage_log
+        WHERE chat_id = ? AND day BETWEEN ? AND ?
+        GROUP BY {column}
+        ORDER BY cost DESC
+        """,
+        (chat_id, since, until),
+    )
+    return [(r["bucket"], r["cost"], r["calls"]) for r in await cur.fetchall()]
 
 
 async def all_rows(chat_id: int) -> list[aiosqlite.Row]:

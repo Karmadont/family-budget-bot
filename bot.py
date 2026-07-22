@@ -27,6 +27,7 @@ BOT_COMMANDS = [
     BotCommand(command="recipe", description="Что приготовить"),
     BotCommand(command="ask", description="Вопрос по покупкам"),
     BotCommand(command="ate", description="Отметить съеденное"),
+    BotCommand(command="cost", description="Расходы на Claude API"),
     BotCommand(command="undo", description="Удалить последнюю запись"),
     BotCommand(command="export", description="Выгрузить в CSV"),
     BotCommand(command="help", description="Справка"),

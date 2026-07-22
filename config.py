@@ -97,6 +97,9 @@ CLAUDE_VISION_MODEL = _env("CLAUDE_VISION_MODEL", CLAUDE_MODEL)
 
 # --- Поведение ---
 CURRENCY = _env("CURRENCY", "₽")
+# Курс доллара для справки в /cost. 0 = показывать только доллары.
+# Anthropic всё равно списывает в долларах, так что это лишь ориентир.
+USD_RATE = _float("USD_RATE", "0")
 _TZ_NAME = _env("TIMEZONE", "Europe/Moscow")
 try:
     TIMEZONE = ZoneInfo(_TZ_NAME)

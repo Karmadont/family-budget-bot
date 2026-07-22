@@ -37,6 +37,7 @@ HELP = """<b>Как мной пользоваться</b>
 /recipe — что приготовить из этого (<code>/recipe быстро и без мяса</code>)
 /ask — вопрос по покупкам (<code>/ask на что ушло больше всего?</code>)
 /ate — отметить съеденное (<code>/ate молоко</code>)
+/cost — сколько потрачено на Claude API
 /undo — удалить последнюю записанную покупку
 /export — выгрузить всё в CSV
 /categories — список категорий
@@ -90,11 +91,14 @@ async def cmd_recipe(message: Message, command: CommandObject) -> None:
 
     await message.bot.send_chat_action(message.chat.id, "typing")
     try:
-        answer = await claude_client.suggest_recipes(services.fridge_as_text(items), command.args)
+        answer, spent = await claude_client.suggest_recipes(
+            services.fridge_as_text(items), command.args
+        )
     except claude_client.ClaudeError as exc:
         await message.answer(str(exc))
         return
 
+    await db.log_usage(message.chat.id, spent)
     for part in services.chunks(answer):
         await message.answer(part)
 
@@ -131,6 +135,12 @@ async def cmd_undo(message: Message) -> None:
         await message.answer("Удалять нечего — записей ещё нет.")
 
 
+@router.message(Command("cost"))
+async def cmd_cost(message: Message, command: CommandObject) -> None:
+    since, until, label = services.parse_period(command.args)
+    await message.answer(await services.cost_report(message.chat.id, since, until, label))
+
+
 @router.message(Command("export"))
 async def cmd_export(message: Message) -> None:
     data = await services.export_csv(message.chat.id)
@@ -148,10 +158,11 @@ async def answer_question(message: Message, question: str) -> None:
     await message.bot.send_chat_action(message.chat.id, "typing")
     context = await services.build_context(message.chat.id)
     try:
-        answer = await claude_client.ask(question, context)
+        answer, spent = await claude_client.ask(question, context)
     except claude_client.ClaudeError as exc:
         await message.answer(str(exc))
         return
 
+    await db.log_usage(message.chat.id, spent)
     for part in services.chunks(answer):
         await message.answer(part)
