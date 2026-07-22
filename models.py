@@ -62,6 +62,7 @@ class ParsedMessage(BaseModel):
     store: str | None = Field(description="Магазин, если упомянут. Иначе null.")
     bought_on: str | None = Field(description="Дата покупки YYYY-MM-DD, если её можно понять из текста ('вчера', '3 марта'). Иначе null.")
     items: list[PurchaseItem] = Field(description="Список позиций. Пустой список, если это не покупка.")
+    total: float | None = Field(description="Итоговая сумма, если она явно названа (строка ИТОГО в чеке или сумма в тексте). Иначе null.")
     note: str | None = Field(description="Короткий комментарий, если что-то осталось непонятным. Иначе null.")
 
 
