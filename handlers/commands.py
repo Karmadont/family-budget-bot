@@ -13,7 +13,6 @@ import config
 import db
 import llm
 import services
-import usage as usage_mod
 from models import CATEGORIES
 
 log = logging.getLogger(__name__)
@@ -21,28 +20,32 @@ router = Router(name="commands")
 
 HELP = """<b>Как мной пользоваться</b>
 
-Просто пишите в чат, что купили и почём — я разберу и запишу:
+Я слежу за тратами семьи и раз в неделю сам присылаю разбор: на что и по каким
+категориям ушли деньги. А ещё отвечаю на вопросы о расходах.
+
+Чтобы траты попадали в статистику, просто пишите в чат, что купили и почём:
 <i>молоко 89, хлеб 45, куриное филе 1.2кг 420</i>
 <i>потратил 3500 в Пятёрочке</i>
 
-Или киньте <b>фото чека</b> — разнесу по позициям сам. Длинный чек лучше
-отправлять файлом, а не фото: так не потеряется мелкий шрифт.
-
-Спросить что угодно — ответьте на моё сообщение или начните со слова «бот»:
+Спросить что угодно про траты — ответьте на моё сообщение или начните со «бот»:
 <i>бот, сколько мы потратили на мясо в этом месяце?</i>
-<i>бот, что приготовить на ужин?</i>
 
-<b>Команды</b>
+<b>Статистика</b>
+/digest — разбор трат за прошлую неделю (то, что я присылаю по расписанию)
 /stats — расходы по категориям (<code>/stats неделя</code>, <code>месяц</code>, <code>год</code>, <code>всё</code>, <code>30</code>)
+/ask — вопрос по покупкам (<code>/ask на что ушло больше всего?</code>)
+/cost — сколько потрачено на нейросеть
+
+<b>Чеки и продукты</b> (по запросу)
+/receipt — разобрать фото чека (подпись к фото или ответ на фото)
 /fridge — что, скорее всего, лежит дома
 /recipe — что приготовить из этого (<code>/recipe быстро и без мяса</code>)
-/ask — вопрос по покупкам (<code>/ask на что ушло больше всего?</code>)
 /ate — отметить съеденное (<code>/ate молоко</code>)
-/cost — сколько потрачено на нейросеть
+
+<b>Прочее</b>
 /undo — удалить последнюю записанную покупку
 /export — выгрузить всё в CSV
 /categories — список категорий
-/provider — какая нейросеть сейчас работает
 /chatid — id этого чата (для ALLOWED_CHAT_IDS)"""
 
 
@@ -70,43 +73,22 @@ async def cmd_categories(message: Message) -> None:
     await message.answer(f"<b>Категории</b>\n{listing}\n\nМеняются в <code>models.py</code>.")
 
 
-@router.message(Command("provider"))
-async def cmd_provider(message: Message) -> None:
-    """Какая нейросеть сейчас разбирает сообщения и читает чеки."""
-    chat, vision = llm.chat_provider(), llm.vision_provider()
-    lines = [
-        "<b>Нейросеть</b>",
-        f"Текст и вопросы: <b>{services.esc(usage_mod.PROVIDER_LABELS.get(chat.name, chat.name))}</b>",
-    ]
-    lines += [f"• {services.esc(line)}" for line in _models_of(chat.name)]
-
-    if config.READ_RECEIPTS:
-        title = usage_mod.PROVIDER_LABELS.get(vision.name, vision.name)
-        how = "смотрит на фото" if vision.supports_images else "распознаёт текст через OCR"
-        if not vision.reads_receipts:
-            how = "чеки читать не умеет"
-        lines += ["", f"Чеки: <b>{services.esc(title)}</b> — {how}"]
-    else:
-        lines += ["", "Чеки: <i>выключено (READ_RECEIPTS=false)</i>"]
-
-    lines += ["", "Переключается в <code>.env</code>: LLM_PROVIDER, VISION_PROVIDER.",
-              "Сравнить, во что обошёлся каждый: /cost"]
-    await message.answer("\n".join(lines))
-
-
-def _models_of(provider: str) -> list[str]:
-    """Модели выбранного провайдера — чтобы не лезть в .env ради проверки."""
-    if provider == usage_mod.YANDEXGPT:
-        return [f"вопросы: {config.YANDEX_MODEL}", f"разбор: {config.YANDEX_PARSER_MODEL}"]
-    if provider == usage_mod.GIGACHAT:
-        return [f"вопросы: {config.GIGACHAT_MODEL}", f"разбор: {config.GIGACHAT_PARSER_MODEL}"]
-    return [f"вопросы: {config.CLAUDE_MODEL}", f"разбор: {config.CLAUDE_PARSER_MODEL}"]
-
-
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, command: CommandObject) -> None:
     since, until, label = services.parse_period(command.args)
     await message.answer(await services.stats_report(message.chat.id, since, until, label))
+
+
+@router.message(Command("digest", "week", "неделя"))
+async def cmd_digest(message: Message) -> None:
+    """Разбор трат за прошлую неделю по запросу — то же, что и еженедельная рассылка."""
+    await message.bot.send_chat_action(message.chat.id, "typing")
+    digest = await services.weekly_digest(message.chat.id)
+    if digest is None:
+        await message.answer("За прошлую неделю покупок не записано — разбирать нечего.")
+        return
+    for part in services.chunks(digest):
+        await message.answer(part)
 
 
 @router.message(Command("fridge"))

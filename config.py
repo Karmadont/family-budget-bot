@@ -4,12 +4,12 @@ config.py — конфигурация бота.
 Все настройки читаются из файла .env рядом с этим файлом (см. .env.example).
 Файл .env в .gitignore и НЕ попадает в репозиторий.
 
-Провайдер нейросети выбирается переменной LLM_PROVIDER: claude | yandexgpt |
-gigachat. Ключи требуются только от тех провайдеров, которые реально включены,
-поэтому держать в .env заполненными все три сразу не обязательно.
+Нейросеть одна — YandexGPT. Разбор текста о покупках и еженедельный анализ трат
+идут через text-модель, чеки — через Yandex Vision OCR плюс ту же модель.
 """
 from __future__ import annotations
 
+import datetime as dt
 import os
 import sys
 from pathlib import Path
@@ -65,11 +65,14 @@ def _flag(name: str, default: str) -> bool:
     return _env(name, default).lower() not in ("0", "false", "no", "off")
 
 
-def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
-    value = _env(name, default).lower()
-    if value not in allowed:
-        _fail(f"{name}='{value}' — допустимые значения: {', '.join(allowed)}.")
-    return value
+def _time(name: str, default: str) -> dt.time:
+    """Разобрать 'ЧЧ:ММ' в объект времени."""
+    raw = _env(name, default)
+    try:
+        hour, minute = (int(part) for part in raw.split(":", 1))
+        return dt.time(hour, minute)
+    except (ValueError, TypeError):
+        _fail(f"{name}='{raw}' — нужно время в формате ЧЧ:ММ, например 10:00.")
 
 
 def _int_set(name: str) -> set[int]:
@@ -95,11 +98,39 @@ TELEGRAM_BOT_TOKEN = _required("TELEGRAM_BOT_TOKEN")
 # куда его добавили (небезопасно, если токен куда-то утечёт).
 ALLOWED_CHAT_IDS = _int_set("ALLOWED_CHAT_IDS")
 
+# --- Yandex Cloud (YandexGPT) ---
+# Оба значения из консоли Yandex Cloud: API-ключ сервисного аккаунта и id каталога.
+YANDEX_API_KEY = _required("YANDEX_API_KEY")
+YANDEX_FOLDER_ID = _required("YANDEX_FOLDER_ID")
+# Имя модели с версией — подставляется в modelUri: gpt://<folder>/<model>.
+YANDEX_MODEL = _env("YANDEX_MODEL", "yandexgpt/latest")
+# Разбор коротких сообщений о покупках — самый частый вызов, тут дешёвая модель уместна.
+YANDEX_PARSER_MODEL = _env("YANDEX_PARSER_MODEL", "yandexgpt-lite/latest")
+# Разбор распознанного текста чека и еженедельный анализ.
+YANDEX_VISION_MODEL = _env("YANDEX_VISION_MODEL", YANDEX_MODEL)
+YANDEX_OCR_MODEL = _env("YANDEX_OCR_MODEL", "page")
+# Таймаут HTTP-запроса к Yandex Cloud, секунд.
+LLM_TIMEOUT = _float("LLM_TIMEOUT", "120")
+# Рублей за миллион токенов (см. комментарий в usage.py — это оценка, впишите свою).
+YANDEX_PRICE_LITE = _float("YANDEX_PRICE_LITE", "200")
+YANDEX_PRICE_PRO = _float("YANDEX_PRICE_PRO", "1200")
+# Рублей за одну распознанную страницу чека.
+YANDEX_OCR_PRICE_PER_PAGE = _float("YANDEX_OCR_PRICE_PER_PAGE", "0.26")
+
+# --- Еженедельный дайджест (главная функция) ---
+# Каждую неделю бот сам выкладывает разбор трат за прошлую неделю.
+WEEKLY_DIGEST = _flag("WEEKLY_DIGEST", "true")
+# День недели публикации: 0 — понедельник … 6 — воскресенье.
+WEEKLY_DIGEST_WEEKDAY = _int("WEEKLY_DIGEST_WEEKDAY", "0")
+if not 0 <= WEEKLY_DIGEST_WEEKDAY <= 6:
+    _fail("WEEKLY_DIGEST_WEEKDAY — число от 0 (понедельник) до 6 (воскресенье).")
+# Время публикации по TIMEZONE.
+WEEKLY_DIGEST_TIME = _time("WEEKLY_DIGEST_TIME", "10:00")
+# Добавлять ли к цифрам короткий анализ от нейросети (тренд, что необычно).
+WEEKLY_DIGEST_ANALYSIS = _flag("WEEKLY_DIGEST_ANALYSIS", "true")
+
 # --- Поведение ---
 CURRENCY = _env("CURRENCY", "₽")
-# Курс доллара. Нужен в двух местах: показать расход на Claude в рублях и
-# свести Claude с YandexGPT/GigaChat в одну валюту для сравнения. 0 = не сводить.
-USD_RATE = _float("USD_RATE", "0")
 _TZ_NAME = _env("TIMEZONE", "Europe/Moscow")
 try:
     TIMEZONE = ZoneInfo(_TZ_NAME)
@@ -111,80 +142,10 @@ FRIDGE_WINDOW_DAYS = _int("FRIDGE_WINDOW_DAYS", "10")
 CONTEXT_PURCHASES_LIMIT = _int("CONTEXT_PURCHASES_LIMIT", "150")
 # Как подтверждать сохранение покупки: reply (текстом) | reaction (эмодзи) | quiet
 CONFIRM_MODE = _env("CONFIRM_MODE", "reply").lower()
-# Читать ли фотографии чеков.
+# Разрешён ли разбор фото чеков командой /receipt.
 READ_RECEIPTS = _flag("READ_RECEIPTS", "true")
 # Предел размера входящей картинки, МБ (у Telegram Bot API свой потолок — 20 МБ).
 MAX_IMAGE_MB = _float("MAX_IMAGE_MB", "20")
-# Таймаут HTTP-запроса к YandexGPT/GigaChat, секунд.
-LLM_TIMEOUT = _float("LLM_TIMEOUT", "120")
-
-# --- Выбор провайдера -------------------------------------------------------
-PROVIDERS = ("claude", "yandexgpt", "gigachat")
-
-# Кто разбирает сообщения и отвечает на вопросы.
-LLM_PROVIDER = _choice("LLM_PROVIDER", "claude", PROVIDERS)
-# Кто читает фото чеков. По умолчанию тот же. Вынесено отдельно, потому что
-# зрение — самое слабое место у российских моделей: можно гонять весь чат через
-# GigaChat, а чеки оставить на Claude.
-VISION_PROVIDER = _choice("VISION_PROVIDER", LLM_PROVIDER, PROVIDERS)
-
-
-def _in_use(provider: str) -> bool:
-    """Нужны ли ключи этого провайдера при текущих настройках."""
-    return provider == LLM_PROVIDER or (READ_RECEIPTS and provider == VISION_PROVIDER)
-
-
-def _key_for(provider: str, name: str) -> str:
-    """Обязательная переменная — но только если провайдер включён."""
-    return _required(name) if _in_use(provider) else _env(name)
-
-
-# --- Anthropic (Claude API) ---
-ANTHROPIC_API_KEY = _key_for("claude", "ANTHROPIC_API_KEY")
-# Модель для ответов на вопросы и рецептов.
-CLAUDE_MODEL = _env("CLAUDE_MODEL", "claude-opus-4-8")
-# Модель для разбора сообщений о покупках. Это самый частый вызов —
-# сюда имеет смысл поставить модель подешевле (см. README, раздел «Стоимость»).
-CLAUDE_PARSER_MODEL = _env("CLAUDE_PARSER_MODEL", CLAUDE_MODEL)
-# Модель для чтения фото чеков. Экономить тут не стоит: ошибка в распознавании
-# мелкого шрифта дороже разницы в цене, а чеки приходят редко.
-CLAUDE_VISION_MODEL = _env("CLAUDE_VISION_MODEL", CLAUDE_MODEL)
-
-# --- Yandex Cloud (YandexGPT) ---
-# Оба значения из консоли Yandex Cloud: API-ключ сервисного аккаунта и id каталога.
-YANDEX_API_KEY = _key_for("yandexgpt", "YANDEX_API_KEY")
-YANDEX_FOLDER_ID = _key_for("yandexgpt", "YANDEX_FOLDER_ID")
-# Имя модели с версией — подставляется в modelUri: gpt://<folder>/<model>.
-YANDEX_MODEL = _env("YANDEX_MODEL", "yandexgpt/latest")
-YANDEX_PARSER_MODEL = _env("YANDEX_PARSER_MODEL", YANDEX_MODEL)
-# Текстовая модель не видит картинок, поэтому чек сначала прогоняется через
-# Yandex Vision OCR, а модели достаётся уже распознанный текст.
-YANDEX_VISION_MODEL = _env("YANDEX_VISION_MODEL", YANDEX_MODEL)
-YANDEX_OCR_MODEL = _env("YANDEX_OCR_MODEL", "page")
-# Рублей за миллион токенов (см. комментарий в usage.py — это оценка).
-YANDEX_PRICE_LITE = _float("YANDEX_PRICE_LITE", "200")
-YANDEX_PRICE_PRO = _float("YANDEX_PRICE_PRO", "1200")
-# Рублей за одну распознанную страницу чека.
-YANDEX_OCR_PRICE_PER_PAGE = _float("YANDEX_OCR_PRICE_PER_PAGE", "0.26")
-
-# --- Сбер (GigaChat) ---
-# Ключ авторизации из личного кабинета — строка base64, её отдают целиком.
-GIGACHAT_AUTH_KEY = _key_for("gigachat", "GIGACHAT_AUTH_KEY")
-GIGACHAT_SCOPE = _env("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
-GIGACHAT_MODEL = _env("GIGACHAT_MODEL", "GigaChat-2-Max")
-GIGACHAT_PARSER_MODEL = _env("GIGACHAT_PARSER_MODEL", GIGACHAT_MODEL)
-# Картинки понимают только старшие модели, Lite их не видит.
-GIGACHAT_VISION_MODEL = _env("GIGACHAT_VISION_MODEL", GIGACHAT_MODEL)
-# Сбер подписывает сертификаты «Минцифры»: без их корневого сертификата в системе
-# проверка TLS падает. Правильный путь — положить сертификат и указать его здесь.
-GIGACHAT_CA_BUNDLE = _env("GIGACHAT_CA_BUNDLE")
-# Аварийный выключатель проверки TLS. Ставить false — значит согласиться на
-# соединение, которое никто не проверяет. Только если иначе совсем никак.
-GIGACHAT_VERIFY_SSL = _flag("GIGACHAT_VERIFY_SSL", "true")
-# Рублей за миллион токенов (оценка, см. usage.py).
-GIGACHAT_PRICE_LITE = _float("GIGACHAT_PRICE_LITE", "200")
-GIGACHAT_PRICE_PRO = _float("GIGACHAT_PRICE_PRO", "1500")
-GIGACHAT_PRICE_MAX = _float("GIGACHAT_PRICE_MAX", "1950")
 
 # --- Хранилище ---
 # Относительный путь считаем от папки проекта, а не от текущей директории:

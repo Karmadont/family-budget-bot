@@ -1,14 +1,15 @@
 """
-handlers/messages.py — обработка обычных сообщений чата.
+handlers/messages.py — обработка сообщений чата.
 
-Текстовое сообщение:
+Текстовое сообщение (главный поток — сбор данных для статистики):
   1. Это обращение к боту? -> отвечаем на вопрос.
   2. Есть ли в тексте цифры? Нет -> молча игнорируем (экономим вызовы API).
-  3. Отдаём текст Claude: покупка или нет. Не покупка -> молчим.
+  3. Отдаём текст модели: покупка или нет. Не покупка -> молчим.
   4. Покупка -> пишем в базу и подтверждаем.
 
-Фотография (или картинка файлом):
-  скачиваем -> приводим к JPEG нужного размера -> Claude читает чек -> в базу.
+Фото чека (второстепенная функция, только по команде /receipt):
+  скачиваем -> приводим к JPEG -> OCR + разбор -> в базу.
+Просто присланное фото бот НЕ трогает — иначе он лез бы в каждую картинку в чате.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import re
 import time
 
 from aiogram import F, Router
+from aiogram.filters import Command, CommandObject
 from aiogram.types import Message, ReactionTypeEmoji
 
 import config
@@ -114,10 +116,12 @@ async def on_text(message: Message) -> None:
     await _save(message, parsed, text)
 
 
-# --- фотографии чеков -------------------------------------------------------
+# --- фото чека по команде /receipt ------------------------------------------
 
-def _image_file(message: Message) -> tuple[str | None, int]:
+def _image_file(message: Message | None) -> tuple[str | None, int]:
     """Найти в сообщении картинку. -> (file_id, размер в байтах)"""
+    if message is None:
+        return None, 0
     if message.photo:
         # photo — список превью разного размера, последний самый крупный.
         largest = message.photo[-1]
@@ -128,15 +132,25 @@ def _image_file(message: Message) -> tuple[str | None, int]:
     return None, 0
 
 
-@router.message(F.photo | F.document.mime_type.startswith("image/"))
-async def on_photo(message: Message) -> None:
+@router.message(Command("receipt", "чек"))
+async def cmd_receipt(message: Message, command: CommandObject) -> None:
+    """
+    Разобрать фото чека. Вызывается принудительно, двумя способами:
+      • фото с подписью «/receipt» (или «/чек»);
+      • «/receipt» в ответ на уже отправленное фото.
+    """
     if not config.READ_RECEIPTS:
-        return
-    if message.from_user and message.from_user.is_bot:
+        await message.reply("Разбор чеков выключен. Включите READ_RECEIPTS=true в .env.")
         return
 
-    file_id, file_size = _image_file(message)
+    # Картинка либо в этом же сообщении (подпись-команда), либо в том, на которое отвечают.
+    source = message if _image_file(message)[0] else message.reply_to_message
+    file_id, file_size = _image_file(source)
     if file_id is None:
+        await message.reply(
+            "Пришлите фото чека с подписью <code>/receipt</code> "
+            "или ответьте <code>/receipt</code> на уже отправленное фото."
+        )
         return
 
     if file_size > config.MAX_IMAGE_MB * 1024 * 1024:
@@ -145,6 +159,9 @@ async def on_photo(message: Message) -> None:
             "Отправьте её обычным фото, а не файлом."
         )
         return
+
+    # Подпись-подсказка: текст после команды или подпись исходного фото.
+    hint = command.args or (source.caption if source is not message else None)
 
     status = await message.reply("🧾 Читаю чек…")
     try:
@@ -168,7 +185,7 @@ async def on_photo(message: Message) -> None:
 
     try:
         parsed, spent = await llm.parse_receipt(
-            prepared, media_type, message.caption, services.today().isoformat()
+            prepared, media_type, hint, services.today().isoformat()
         )
     except llm.LLMError as exc:
         await status.edit_text(str(exc))
@@ -181,7 +198,7 @@ async def on_photo(message: Message) -> None:
         await status.edit_text(f"Не увидел на фото чек с покупками.{note}")
         return
 
-    await _save(message, parsed, message.caption or "[фото чека]", status=status)
+    await _save(message, parsed, hint or "[фото чека]", status=status)
 
 
 # --- общая часть ------------------------------------------------------------

@@ -1,10 +1,8 @@
 """
 models.py — схемы данных, которые модель обязана вернуть.
 
-JSON Schema отсюда уходит провайдеру: в Claude через output_config.format,
-в YandexGPT через json_schema, в GigaChat через описание функции. Это
-гарантирует, что ответ распарсится, и нам не нужно вылавливать JSON из текста
-регулярками.
+JSON Schema отсюда уходит в YandexGPT через поле json_schema. Это гарантирует,
+что ответ распарсится, и нам не нужно вылавливать JSON из текста регулярками.
 """
 from __future__ import annotations
 
@@ -69,11 +67,6 @@ class ParsedMessage(BaseModel):
     note: str | None = Field(description="Короткий комментарий, если что-то осталось непонятным. Иначе null.")
 
 
-# Схема для output_config.format. extra="forbid" даёт additionalProperties: false,
-# отсутствие значений по умолчанию — полный required. Обоего требует structured outputs.
-PARSED_MESSAGE_SCHEMA: dict = ParsedMessage.model_json_schema()
-
-
 def _inline_refs(node: Any, defs: dict) -> Any:
     """Подставить определения из $defs вместо ссылок $ref."""
     if isinstance(node, list):
@@ -92,8 +85,8 @@ def _inline_refs(node: Any, defs: dict) -> Any:
     return {k: _inline_refs(v, defs) for k, v in node.items() if k != "$defs"}
 
 
-# Та же схема, но без $ref/$defs. Structured outputs у Anthropic ссылки понимает,
-# а YandexGPT и GigaChat — далеко не всегда: им отдаём развёрнутый вариант.
-PARSED_MESSAGE_SCHEMA_FLAT: dict = _inline_refs(
-    PARSED_MESSAGE_SCHEMA, PARSED_MESSAGE_SCHEMA.get("$defs", {})
-)
+# Схема для json_schema. extra="forbid" даёт additionalProperties: false,
+# отсутствие значений по умолчанию — полный required. YandexGPT ссылки $ref
+# понимает плохо, поэтому отдаём схему с развёрнутыми вложенными объектами.
+_RAW_SCHEMA: dict = ParsedMessage.model_json_schema()
+PARSED_MESSAGE_SCHEMA: dict = _inline_refs(_RAW_SCHEMA, _RAW_SCHEMA.get("$defs", {}))

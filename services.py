@@ -9,10 +9,14 @@ import csv
 import datetime as dt
 import html
 import io
+import logging
 
 import config
 import db
+import llm
 import usage as usage_mod
+
+log = logging.getLogger(__name__)
 
 TELEGRAM_LIMIT = 4000  # реальный лимит 4096, оставляем запас на теги
 
@@ -74,28 +78,14 @@ def esc(text: str | None) -> str:
     return html.escape(text or "", quote=False)
 
 
-def usd(value: float) -> str:
-    """Доллары с разумным числом знаков: $3.42 и $0.63, но $0.0021 для мелочи."""
-    if value >= 0.1:
-        return f"${value:,.2f}".replace(",", " ")
-    if value >= 0.001:
-        return f"${value:.4f}"
-    return f"${value:.5f}"
-
-
 def rub(value: float) -> str:
-    """Рубли с тем же принципом: 128 ₽, 1,20 ₽, 0,26 ₽, 0,0043 ₽."""
+    """Рубли с разумным числом знаков: 128 ₽, 1,20 ₽, 0,26 ₽, 0,0043 ₽."""
     if value >= 100:
         return f"{value:,.0f} ₽".replace(",", " ")
     if value >= 1:
         return f"{value:,.2f} ₽".replace(",", " ").replace(".", ",")
     # У мелочи хвост из нулей только мешает: 0,2600 -> 0,26
     return f"{value:.4f}".rstrip("0").rstrip(".").replace(".", ",") + " ₽"
-
-
-def spent(value: float, currency: str) -> str:
-    """Стоимость вызовов в валюте провайдера."""
-    return rub(value) if currency == usage_mod.RUB else usd(value)
 
 
 def plural(count: int, one: str, few: str, many: str) -> str:
@@ -161,119 +151,107 @@ async def stats_report(chat_id: int, since: str, until: str, label: str) -> str:
 
 
 async def cost_report(chat_id: int, since: str, until: str, label: str) -> str:
-    """Сколько потрачено на нейросеть за период — с разбивкой по провайдерам."""
-    calls, tok_in, tok_out = await db.usage_totals(chat_id, since, until)
+    """Сколько потрачено на YandexGPT за период."""
+    calls, tok_in, tok_out, total = await db.usage_totals(chat_id, since, until)
     if not calls:
         return f"За период <b>{esc(label)}</b> обращений к нейросети не было."
 
-    by_provider = await db.usage_by("provider", chat_id, since, until)
-    totals = _by_currency(by_provider)
-    rubles = _total_rubles(totals)
-
     lines = [
         f"<b>Расходы на нейросеть {esc(label)}</b>",
-        f"Всего: <b>{_amounts(totals)}</b> за {calls} "
-        f"{plural(calls, 'вызов', 'вызова', 'вызовов')}",
+        f"Всего: <b>{rub(total)}</b> за {calls} {plural(calls, 'вызов', 'вызова', 'вызовов')}",
+        "",
+        "<b>По операциям</b>",
     ]
-    if rubles is None:
-        lines.append("<i>Задайте USD_RATE в .env — сведу провайдеров в одну валюту.</i>")
-    elif usage_mod.USD in totals:
-        lines.append(f"<i>≈ {rub(rubles)} по курсу {config.USD_RATE:g} ₽/$</i>")
-
-    # Ради этой разбивки всё и затевалось: видно, во что обходится каждый провайдер.
-    if len(by_provider) > 1:
-        lines += ["", "<b>По провайдерам</b>"]
-        lines += _breakdown(by_provider, usage_mod.PROVIDER_LABELS)
-
-    lines += ["", "<b>По операциям</b>"]
-    lines += _breakdown(
-        await db.usage_by("kind", chat_id, since, until), usage_mod.KIND_LABELS
-    )
+    for kind, cost, count in await db.usage_by("kind", chat_id, since, until):
+        name = usage_mod.KIND_LABELS.get(kind, kind)
+        lines.append(f"• {esc(name)} — {rub(cost)} ({count})")
 
     by_model = await db.usage_by("model", chat_id, since, until)
-    if len({model for model, *_ in by_model}) > 1:
+    if len(by_model) > 1:
         lines += ["", "<b>По моделям</b>"]
-        lines += _breakdown(by_model, {})
+        lines += [f"• {esc(m)} — {rub(cost)} ({count})" for m, cost, count in by_model]
 
     lines += ["", f"<i>Токенов: {tokens(tok_in)} вход / {tokens(tok_out)} выход</i>"]
 
-    forecast = _month_forecast(since, until, totals)
+    forecast = _month_forecast(since, until, total)
     if forecast is not None:
-        lines.append(f"<i>При таком темпе за месяц выйдет ~{_amounts(forecast)}</i>")
+        lines.append(f"<i>При таком темпе за месяц выйдет ~{rub(forecast)}</i>")
 
     return "\n".join(lines)
 
 
-def _by_currency(rows: list[tuple[str, str, float, int]]) -> dict[str, float]:
-    """Суммы из разбивки, сложенные по валютам."""
-    totals: dict[str, float] = {}
-    for _, currency, cost, _count in rows:
-        totals[currency] = totals.get(currency, 0.0) + cost
-    return totals
-
-
-def _amounts(totals: dict[str, float]) -> str:
-    """Суммы в разных валютах одной строкой: '128 ₽ + $0.15'."""
-    return " + ".join(spent(cost, currency) for currency, cost in totals.items()) or "0 ₽"
-
-
-def _total_rubles(totals: dict[str, float]) -> float | None:
-    """Всё в рублях. None, если есть доллары, а курс не задан."""
-    total = 0.0
-    for currency, cost in totals.items():
-        value = usage_mod.to_rubles(cost, currency)
-        if value is None:
-            return None
-        total += value
-    return total
-
-
-# Курс исключительно для сортировки строк отчёта, когда USD_RATE не задан:
-# показывать это число никому не нужно, но доллары и рубли надо как-то
-# расставить по убыванию в одном списке.
-_SORT_RATE = 100.0
-
-
-def _breakdown(
-    rows: list[tuple[str, str, float, int]], labels: dict[str, str]
-) -> list[str]:
-    """
-    Строки разбивки: одна на значение, даже если оно набралось в разных валютах.
-
-    Из базы приходит по строке на (значение, валюта) — иначе доллары сложились
-    бы с рублями. Здесь сводим обратно, чтобы «разбор покупок» не встречался
-    в отчёте дважды.
-    """
-    grouped: dict[str, tuple[dict[str, float], int]] = {}
-    for bucket, currency, cost, count in rows:
-        costs, calls = grouped.setdefault(bucket, ({}, 0))
-        costs[currency] = costs.get(currency, 0.0) + cost
-        grouped[bucket] = (costs, calls + count)
-
-    def weight(item: tuple[str, tuple[dict[str, float], int]]) -> float:
-        costs, _ = item[1]
-        return sum(
-            cost * (_SORT_RATE if currency == usage_mod.USD else 1)
-            for currency, cost in costs.items()
-        )
-
-    lines = []
-    for bucket, (costs, calls) in sorted(grouped.items(), key=weight, reverse=True):
-        name = labels.get(bucket, bucket)
-        lines.append(f"• {esc(name)} — {_amounts(costs)} ({calls})")
-    return lines
-
-
-def _month_forecast(
-    since: str, until: str, totals: dict[str, float]
-) -> dict[str, float] | None:
+def _month_forecast(since: str, until: str, cost: float) -> float | None:
     """Прогноз на конец месяца — только если смотрим текущий месяц с его начала."""
     now = today()
     if since != now.replace(day=1).isoformat() or until != now.isoformat():
         return None
     days_in_month = calendar.monthrange(now.year, now.month)[1]
-    scale = days_in_month / now.day
-    return {currency: cost * scale for currency, cost in totals.items()}
+    return cost / now.day * days_in_month
+
+
+# --- еженедельный дайджест (главная функция) --------------------------------
+
+def last_week() -> tuple[str, str, str]:
+    """Границы прошлой календарной недели (пн–вс). -> (since, until, название)"""
+    now = today()
+    this_monday = now - dt.timedelta(days=now.weekday())
+    since = this_monday - dt.timedelta(days=7)
+    until = this_monday - dt.timedelta(days=1)
+    return since.isoformat(), until.isoformat(), "за прошлую неделю"
+
+
+async def weekly_digest(chat_id: int) -> str | None:
+    """
+    Готовый текст дайджеста за прошлую неделю: цифры по категориям + анализ.
+
+    None, если за неделю ничего не записано (тогда дайджест не публикуем —
+    еженедельное «покупок не записано» быстро надоедает).
+    """
+    since, until, label = last_week()
+    stats = await db.category_stats(chat_id, since, until)
+    if not stats:
+        return None
+
+    report = await stats_report(chat_id, since, until, label)
+
+    if not config.WEEKLY_DIGEST_ANALYSIS:
+        return report
+
+    context = await _weekly_analysis_context(chat_id, since, until)
+    try:
+        analysis, spent = await llm.analyze_week(context)
+    except llm.LLMError as exc:
+        # Анализ — приятное дополнение, но цифры важнее: сбой модели не должен
+        # оставить чат вовсе без дайджеста.
+        log.warning("Анализ недели не удался: %s", exc)
+        return report
+
+    await db.log_usage(chat_id, spent)
+    if not analysis.strip():
+        return report
+    return f"{report}\n\n<b>Что видно</b>\n{analysis.strip()}"
+
+
+async def _weekly_analysis_context(chat_id: int, since: str, until: str) -> str:
+    """Данные для анализа: прошлая неделя и позапрошлая для сравнения."""
+    prev_since = (dt.date.fromisoformat(since) - dt.timedelta(days=7)).isoformat()
+    prev_until = (dt.date.fromisoformat(since) - dt.timedelta(days=1)).isoformat()
+
+    week = await db.category_stats(chat_id, since, until)
+    prev = await db.category_stats(chat_id, prev_since, prev_until)
+
+    def block(title: str, rows: list[tuple[str, float, int]]) -> str:
+        if not rows:
+            return f"{title}: покупок нет."
+        total = sum(r[1] for r in rows)
+        body = "\n".join(f"- {cat}: {sub:.0f} ({n} поз.)" for cat, sub, n in rows)
+        return f"{title} (всего {total:.0f} {config.CURRENCY}):\n{body}"
+
+    return (
+        block(f"Прошлая неделя ({since} — {until})", week)
+        + "\n\n"
+        + block(f"Позапрошлая неделя ({prev_since} — {prev_until})", prev)
+    )
 
 
 async def fridge_report(chat_id: int) -> str:
