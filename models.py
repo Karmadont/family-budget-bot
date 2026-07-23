@@ -1,12 +1,15 @@
 """
 models.py — схемы данных, которые модель обязана вернуть.
 
-JSON Schema отсюда уходит в Claude через output_config.format — это гарантирует,
-что ответ распарсится, и нам не нужно вылавливать JSON из текста регулярками.
+JSON Schema отсюда уходит провайдеру: в Claude через output_config.format,
+в YandexGPT через json_schema, в GigaChat через описание функции. Это
+гарантирует, что ответ распарсится, и нам не нужно вылавливать JSON из текста
+регулярками.
 """
 from __future__ import annotations
 
-from typing import Literal, get_args
+import copy
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -69,3 +72,28 @@ class ParsedMessage(BaseModel):
 # Схема для output_config.format. extra="forbid" даёт additionalProperties: false,
 # отсутствие значений по умолчанию — полный required. Обоего требует structured outputs.
 PARSED_MESSAGE_SCHEMA: dict = ParsedMessage.model_json_schema()
+
+
+def _inline_refs(node: Any, defs: dict) -> Any:
+    """Подставить определения из $defs вместо ссылок $ref."""
+    if isinstance(node, list):
+        return [_inline_refs(item, defs) for item in node]
+    if not isinstance(node, dict):
+        return node
+
+    ref = node.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/$defs/"):
+        target = defs.get(ref.rsplit("/", 1)[-1], {})
+        resolved = _inline_refs(copy.deepcopy(target), defs)
+        # Соседи $ref (title, description) в JSON Schema дополняют цель.
+        extras = {k: v for k, v in node.items() if k != "$ref"}
+        return {**resolved, **_inline_refs(extras, defs)} if extras else resolved
+
+    return {k: _inline_refs(v, defs) for k, v in node.items() if k != "$defs"}
+
+
+# Та же схема, но без $ref/$defs. Structured outputs у Anthropic ссылки понимает,
+# а YandexGPT и GigaChat — далеко не всегда: им отдаём развёрнутый вариант.
+PARSED_MESSAGE_SCHEMA_FLAT: dict = _inline_refs(
+    PARSED_MESSAGE_SCHEMA, PARSED_MESSAGE_SCHEMA.get("$defs", {})
+)

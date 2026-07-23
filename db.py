@@ -7,6 +7,7 @@ db.py — хранилище покупок на SQLite.
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import aiosqlite
@@ -42,24 +43,30 @@ CREATE INDEX IF NOT EXISTS idx_purchases_chat_date ON purchases (chat_id, bought
 CREATE INDEX IF NOT EXISTS idx_purchases_chat_cat  ON purchases (chat_id, category);
 CREATE INDEX IF NOT EXISTS idx_purchases_fridge    ON purchases (chat_id, is_food, consumed_at);
 
--- Расход на Claude API. cost_usd храним посчитанным: цены меняются,
--- и пересчитывать прошлое по новому прайсу было бы неверно.
+-- Расход на нейросеть. cost храним посчитанным: цены меняются, и пересчитывать
+-- прошлое по новому прайсу было бы неверно. Валюта у провайдеров разная
+-- (Anthropic — доллары, Яндекс и Сбер — рубли), поэтому лежит рядом.
 CREATE TABLE IF NOT EXISTS usage_log (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id            INTEGER NOT NULL,
     at                 TEXT    NOT NULL,          -- ISO timestamp
     day                TEXT    NOT NULL,          -- YYYY-MM-DD, для группировки
     kind               TEXT    NOT NULL,          -- parse | receipt | ask | recipe
+    provider           TEXT    NOT NULL,          -- claude | yandexgpt | gigachat
     model              TEXT    NOT NULL,
     input_tokens       INTEGER NOT NULL,
     output_tokens      INTEGER NOT NULL,
     cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
     cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-    cost_usd           REAL    NOT NULL
+    cost               REAL    NOT NULL,
+    currency           TEXT    NOT NULL           -- USD | RUB
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_chat_day ON usage_log (chat_id, day);
 """
+
+# Столбцы, по которым разрешено группировать расход в /cost.
+USAGE_BUCKETS = ("kind", "model", "provider")
 
 
 @dataclass(slots=True)
@@ -110,8 +117,46 @@ async def init() -> None:
     _conn = await aiosqlite.connect(config.DB_PATH)
     _conn.row_factory = aiosqlite.Row
     await _conn.create_function("pylower", 1, _lower, deterministic=True)
+
+    legacy = await _park_legacy_usage_log()
     await _conn.executescript(SCHEMA)
+    if legacy:
+        await _restore_legacy_usage_log()
     await _conn.commit()
+
+
+async def _park_legacy_usage_log() -> bool:
+    """
+    Отодвинуть таблицу расходов, оставшуюся от версии с одним лишь Claude.
+
+    В ней нет столбцов provider и currency, а стоимость лежит в cost_usd.
+    Переименовываем, чтобы SCHEMA создала таблицу нового вида; данные перенесём
+    следом. Индекс сносим руками: при переименовании таблицы имя индекса не
+    меняется, и `CREATE INDEX IF NOT EXISTS` молча пропустил бы новый.
+    """
+    cur = await _conn.execute("PRAGMA table_info(usage_log)")
+    columns = {row["name"] for row in await cur.fetchall()}
+    if not columns or "provider" in columns:
+        return False
+
+    await _conn.execute("DROP INDEX IF EXISTS idx_usage_chat_day")
+    await _conn.execute("ALTER TABLE usage_log RENAME TO usage_log_v1")
+    return True
+
+
+async def _restore_legacy_usage_log() -> None:
+    """Перелить старые записи: всё, что было до переключаемых провайдеров, — Claude."""
+    await _conn.execute(
+        """
+        INSERT INTO usage_log
+            (chat_id, at, day, kind, provider, model, input_tokens, output_tokens,
+             cache_read_tokens, cache_write_tokens, cost, currency)
+        SELECT chat_id, at, day, kind, 'claude', model, input_tokens, output_tokens,
+               cache_read_tokens, cache_write_tokens, cost_usd, 'USD'
+        FROM usage_log_v1
+        """
+    )
+    await _conn.execute("DROP TABLE usage_log_v1")
 
 
 async def close() -> None:
@@ -276,59 +321,69 @@ async def recent(chat_id: int, limit: int) -> list[Purchase]:
     return [Purchase.from_row(r) for r in await cur.fetchall()]
 
 
-async def log_usage(chat_id: int, entry: Usage) -> None:
-    """Записать расход одного обращения к API."""
+async def log_usage(chat_id: int, entries: Iterable[Usage]) -> None:
+    """Записать расход обращений к API (у чтения чека через OCR их два)."""
     now = dt.datetime.now(config.TIMEZONE)
-    await _db().execute(
-        """
-        INSERT INTO usage_log
-            (chat_id, at, day, kind, model, input_tokens, output_tokens,
-             cache_read_tokens, cache_write_tokens, cost_usd)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
+    rows = [
         (
             chat_id, now.isoformat(timespec="seconds"), now.date().isoformat(),
-            entry.kind, entry.model, entry.input_tokens, entry.output_tokens,
-            entry.cache_read_tokens, entry.cache_write_tokens, entry.cost_usd,
-        ),
+            entry.kind, entry.provider, entry.model, entry.input_tokens, entry.output_tokens,
+            entry.cache_read_tokens, entry.cache_write_tokens, entry.cost, entry.currency,
+        )
+        for entry in entries
+    ]
+    if not rows:
+        return
+    await _db().executemany(
+        """
+        INSERT INTO usage_log
+            (chat_id, at, day, kind, provider, model, input_tokens, output_tokens,
+             cache_read_tokens, cache_write_tokens, cost, currency)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
     )
     await _db().commit()
 
 
-async def usage_totals(chat_id: int, since: str, until: str) -> tuple[int, int, int, float]:
-    """Итог за период. -> (вызовов, входных токенов, выходных, долларов)"""
+async def usage_totals(chat_id: int, since: str, until: str) -> tuple[int, int, int]:
+    """Итог за период. -> (вызовов, входных токенов, выходных)"""
     cur = await _db().execute(
         """
         SELECT COUNT(*) AS calls,
                COALESCE(SUM(input_tokens + cache_read_tokens + cache_write_tokens), 0) AS tin,
-               COALESCE(SUM(output_tokens), 0) AS tout,
-               COALESCE(SUM(cost_usd), 0) AS cost
+               COALESCE(SUM(output_tokens), 0) AS tout
         FROM usage_log
         WHERE chat_id = ? AND day BETWEEN ? AND ?
         """,
         (chat_id, since, until),
     )
     row = await cur.fetchone()
-    return row["calls"], row["tin"], row["tout"], row["cost"]
+    return row["calls"], row["tin"], row["tout"]
 
 
 async def usage_by(
     column: str, chat_id: int, since: str, until: str
-) -> list[tuple[str, float, int]]:
-    """Разбивка расхода по kind или model. -> [(значение, долларов, вызовов)]"""
-    if column not in ("kind", "model"):  # column идёт в SQL — только из белого списка
+) -> list[tuple[str, str, float, int]]:
+    """
+    Разбивка расхода по kind, model или provider.
+
+    Валюта входит в группировку: складывать доллары Anthropic с рублями Сбера
+    нельзя. -> [(значение, валюта, стоимость, вызовов)]
+    """
+    if column not in USAGE_BUCKETS:  # column идёт в SQL — только из белого списка
         raise ValueError(f"нельзя группировать по {column!r}")
     cur = await _db().execute(
         f"""
-        SELECT {column} AS bucket, SUM(cost_usd) AS cost, COUNT(*) AS calls
+        SELECT {column} AS bucket, currency, SUM(cost) AS cost, COUNT(*) AS calls
         FROM usage_log
         WHERE chat_id = ? AND day BETWEEN ? AND ?
-        GROUP BY {column}
+        GROUP BY {column}, currency
         ORDER BY cost DESC
         """,
         (chat_id, since, until),
     )
-    return [(r["bucket"], r["cost"], r["calls"]) for r in await cur.fetchall()]
+    return [(r["bucket"], r["currency"], r["cost"], r["calls"]) for r in await cur.fetchall()]
 
 
 async def all_rows(chat_id: int) -> list[aiosqlite.Row]:

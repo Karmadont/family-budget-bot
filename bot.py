@@ -17,6 +17,7 @@ from aiogram.types import BotCommand, Message
 
 import config
 import db
+import llm
 from handlers import commands_router, messages_router
 
 log = logging.getLogger(__name__)
@@ -27,7 +28,8 @@ BOT_COMMANDS = [
     BotCommand(command="recipe", description="Что приготовить"),
     BotCommand(command="ask", description="Вопрос по покупкам"),
     BotCommand(command="ate", description="Отметить съеденное"),
-    BotCommand(command="cost", description="Расходы на Claude API"),
+    BotCommand(command="cost", description="Расходы на нейросеть"),
+    BotCommand(command="provider", description="Какая нейросеть работает"),
     BotCommand(command="undo", description="Удалить последнюю запись"),
     BotCommand(command="export", description="Выгрузить в CSV"),
     BotCommand(command="help", description="Справка"),
@@ -35,7 +37,7 @@ BOT_COMMANDS = [
 
 
 class ChatGuard(BaseMiddleware):
-    """Пускаем в работу только чаты из ALLOWED_CHAT_IDS."""
+    """Пускаем в раьботу только чаты из ALLOWED_CHAT_IDS."""
 
     async def __call__(
         self,
@@ -73,15 +75,30 @@ async def main() -> None:
     dispatcher.include_router(messages_router)
 
     me = await bot.me()
-    log.info("Запущен как @%s (модель: %s)", me.username, config.CLAUDE_MODEL)
+    log.info(
+        "Запущен как @%s (текст: %s, чеки: %s)",
+        me.username,
+        config.LLM_PROVIDER,
+        config.VISION_PROVIDER if config.READ_RECEIPTS else "выключено",
+    )
     if not config.ALLOWED_CHAT_IDS:
         log.warning("ALLOWED_CHAT_IDS пуст — бот ответит в любом чате, куда его добавили.")
+    used = {config.LLM_PROVIDER}
+    if config.READ_RECEIPTS:
+        used.add(config.VISION_PROVIDER)
+    # Claude считает в долларах, YandexGPT и GigaChat — в рублях.
+    if "claude" in used and used != {"claude"} and not config.USD_RATE:
+        log.warning(
+            "Claude считает в долларах, а второй провайдер в рублях. Задайте USD_RATE "
+            "в .env, иначе /cost не сведёт их в одну цифру."
+        )
 
     await bot.set_my_commands(BOT_COMMANDS)
     try:
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
     finally:
         await bot.session.close()
+        await llm.close()
         await db.close()
 
 

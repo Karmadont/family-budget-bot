@@ -83,11 +83,19 @@ def usd(value: float) -> str:
     return f"${value:.5f}"
 
 
-def in_rubles(value_usd: float) -> str:
-    """Приписка с рублями, если в .env задан курс. Иначе пусто."""
-    if not config.USD_RATE:
-        return ""
-    return f" (~{round(value_usd * config.USD_RATE):,} ₽)".replace(",", " ")
+def rub(value: float) -> str:
+    """Рубли с тем же принципом: 128 ₽, 1,20 ₽, 0,26 ₽, 0,0043 ₽."""
+    if value >= 100:
+        return f"{value:,.0f} ₽".replace(",", " ")
+    if value >= 1:
+        return f"{value:,.2f} ₽".replace(",", " ").replace(".", ",")
+    # У мелочи хвост из нулей только мешает: 0,2600 -> 0,26
+    return f"{value:.4f}".rstrip("0").rstrip(".").replace(".", ",") + " ₽"
+
+
+def spent(value: float, currency: str) -> str:
+    """Стоимость вызовов в валюте провайдера."""
+    return rub(value) if currency == usage_mod.RUB else usd(value)
 
 
 def plural(count: int, one: str, few: str, many: str) -> str:
@@ -153,43 +161,119 @@ async def stats_report(chat_id: int, since: str, until: str, label: str) -> str:
 
 
 async def cost_report(chat_id: int, since: str, until: str, label: str) -> str:
-    """Сколько потрачено на Claude API за период."""
-    calls, tok_in, tok_out, total = await db.usage_totals(chat_id, since, until)
+    """Сколько потрачено на нейросеть за период — с разбивкой по провайдерам."""
+    calls, tok_in, tok_out = await db.usage_totals(chat_id, since, until)
     if not calls:
-        return f"За период <b>{esc(label)}</b> обращений к Claude не было."
+        return f"За период <b>{esc(label)}</b> обращений к нейросети не было."
+
+    by_provider = await db.usage_by("provider", chat_id, since, until)
+    totals = _by_currency(by_provider)
+    rubles = _total_rubles(totals)
 
     lines = [
-        f"<b>Расходы на Claude {esc(label)}</b>",
-        f"Всего: <b>{usd(total)}</b>{in_rubles(total)} за {calls} "
+        f"<b>Расходы на нейросеть {esc(label)}</b>",
+        f"Всего: <b>{_amounts(totals)}</b> за {calls} "
         f"{plural(calls, 'вызов', 'вызова', 'вызовов')}",
-        "",
-        "<b>По операциям</b>",
     ]
-    for kind, cost, count in await db.usage_by("kind", chat_id, since, until):
-        name = usage_mod.KIND_LABELS.get(kind, kind)
-        lines.append(f"• {esc(name)} — {usd(cost)} ({count})")
+    if rubles is None:
+        lines.append("<i>Задайте USD_RATE в .env — сведу провайдеров в одну валюту.</i>")
+    elif usage_mod.USD in totals:
+        lines.append(f"<i>≈ {rub(rubles)} по курсу {config.USD_RATE:g} ₽/$</i>")
+
+    # Ради этой разбивки всё и затевалось: видно, во что обходится каждый провайдер.
+    if len(by_provider) > 1:
+        lines += ["", "<b>По провайдерам</b>"]
+        lines += _breakdown(by_provider, usage_mod.PROVIDER_LABELS)
+
+    lines += ["", "<b>По операциям</b>"]
+    lines += _breakdown(
+        await db.usage_by("kind", chat_id, since, until), usage_mod.KIND_LABELS
+    )
 
     by_model = await db.usage_by("model", chat_id, since, until)
-    if len(by_model) > 1:
+    if len({model for model, *_ in by_model}) > 1:
         lines += ["", "<b>По моделям</b>"]
-        lines += [f"• {esc(m)} — {usd(cost)} ({count})" for m, cost, count in by_model]
+        lines += _breakdown(by_model, {})
 
     lines += ["", f"<i>Токенов: {tokens(tok_in)} вход / {tokens(tok_out)} выход</i>"]
 
-    forecast = _month_forecast(since, until, total)
+    forecast = _month_forecast(since, until, totals)
     if forecast is not None:
-        lines.append(f"<i>При таком темпе за месяц выйдет ~{usd(forecast)}{in_rubles(forecast)}</i>")
+        lines.append(f"<i>При таком темпе за месяц выйдет ~{_amounts(forecast)}</i>")
 
     return "\n".join(lines)
 
 
-def _month_forecast(since: str, until: str, spent: float) -> float | None:
+def _by_currency(rows: list[tuple[str, str, float, int]]) -> dict[str, float]:
+    """Суммы из разбивки, сложенные по валютам."""
+    totals: dict[str, float] = {}
+    for _, currency, cost, _count in rows:
+        totals[currency] = totals.get(currency, 0.0) + cost
+    return totals
+
+
+def _amounts(totals: dict[str, float]) -> str:
+    """Суммы в разных валютах одной строкой: '128 ₽ + $0.15'."""
+    return " + ".join(spent(cost, currency) for currency, cost in totals.items()) or "0 ₽"
+
+
+def _total_rubles(totals: dict[str, float]) -> float | None:
+    """Всё в рублях. None, если есть доллары, а курс не задан."""
+    total = 0.0
+    for currency, cost in totals.items():
+        value = usage_mod.to_rubles(cost, currency)
+        if value is None:
+            return None
+        total += value
+    return total
+
+
+# Курс исключительно для сортировки строк отчёта, когда USD_RATE не задан:
+# показывать это число никому не нужно, но доллары и рубли надо как-то
+# расставить по убыванию в одном списке.
+_SORT_RATE = 100.0
+
+
+def _breakdown(
+    rows: list[tuple[str, str, float, int]], labels: dict[str, str]
+) -> list[str]:
+    """
+    Строки разбивки: одна на значение, даже если оно набралось в разных валютах.
+
+    Из базы приходит по строке на (значение, валюта) — иначе доллары сложились
+    бы с рублями. Здесь сводим обратно, чтобы «разбор покупок» не встречался
+    в отчёте дважды.
+    """
+    grouped: dict[str, tuple[dict[str, float], int]] = {}
+    for bucket, currency, cost, count in rows:
+        costs, calls = grouped.setdefault(bucket, ({}, 0))
+        costs[currency] = costs.get(currency, 0.0) + cost
+        grouped[bucket] = (costs, calls + count)
+
+    def weight(item: tuple[str, tuple[dict[str, float], int]]) -> float:
+        costs, _ = item[1]
+        return sum(
+            cost * (_SORT_RATE if currency == usage_mod.USD else 1)
+            for currency, cost in costs.items()
+        )
+
+    lines = []
+    for bucket, (costs, calls) in sorted(grouped.items(), key=weight, reverse=True):
+        name = labels.get(bucket, bucket)
+        lines.append(f"• {esc(name)} — {_amounts(costs)} ({calls})")
+    return lines
+
+
+def _month_forecast(
+    since: str, until: str, totals: dict[str, float]
+) -> dict[str, float] | None:
     """Прогноз на конец месяца — только если смотрим текущий месяц с его начала."""
     now = today()
     if since != now.replace(day=1).isoformat() or until != now.isoformat():
         return None
     days_in_month = calendar.monthrange(now.year, now.month)[1]
-    return spent / now.day * days_in_month
+    scale = days_in_month / now.day
+    return {currency: cost * scale for currency, cost in totals.items()}
 
 
 async def fridge_report(chat_id: int) -> str:

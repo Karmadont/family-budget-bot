@@ -9,10 +9,11 @@ from aiogram import Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BufferedInputFile, Message
 
-import claude_client
 import config
 import db
+import llm
 import services
+import usage as usage_mod
 from models import CATEGORIES
 
 log = logging.getLogger(__name__)
@@ -37,10 +38,11 @@ HELP = """<b>Как мной пользоваться</b>
 /recipe — что приготовить из этого (<code>/recipe быстро и без мяса</code>)
 /ask — вопрос по покупкам (<code>/ask на что ушло больше всего?</code>)
 /ate — отметить съеденное (<code>/ate молоко</code>)
-/cost — сколько потрачено на Claude API
+/cost — сколько потрачено на нейросеть
 /undo — удалить последнюю записанную покупку
 /export — выгрузить всё в CSV
 /categories — список категорий
+/provider — какая нейросеть сейчас работает
 /chatid — id этого чата (для ALLOWED_CHAT_IDS)"""
 
 
@@ -68,6 +70,39 @@ async def cmd_categories(message: Message) -> None:
     await message.answer(f"<b>Категории</b>\n{listing}\n\nМеняются в <code>models.py</code>.")
 
 
+@router.message(Command("provider"))
+async def cmd_provider(message: Message) -> None:
+    """Какая нейросеть сейчас разбирает сообщения и читает чеки."""
+    chat, vision = llm.chat_provider(), llm.vision_provider()
+    lines = [
+        "<b>Нейросеть</b>",
+        f"Текст и вопросы: <b>{services.esc(usage_mod.PROVIDER_LABELS.get(chat.name, chat.name))}</b>",
+    ]
+    lines += [f"• {services.esc(line)}" for line in _models_of(chat.name)]
+
+    if config.READ_RECEIPTS:
+        title = usage_mod.PROVIDER_LABELS.get(vision.name, vision.name)
+        how = "смотрит на фото" if vision.supports_images else "распознаёт текст через OCR"
+        if not vision.reads_receipts:
+            how = "чеки читать не умеет"
+        lines += ["", f"Чеки: <b>{services.esc(title)}</b> — {how}"]
+    else:
+        lines += ["", "Чеки: <i>выключено (READ_RECEIPTS=false)</i>"]
+
+    lines += ["", "Переключается в <code>.env</code>: LLM_PROVIDER, VISION_PROVIDER.",
+              "Сравнить, во что обошёлся каждый: /cost"]
+    await message.answer("\n".join(lines))
+
+
+def _models_of(provider: str) -> list[str]:
+    """Модели выбранного провайдера — чтобы не лезть в .env ради проверки."""
+    if provider == usage_mod.YANDEXGPT:
+        return [f"вопросы: {config.YANDEX_MODEL}", f"разбор: {config.YANDEX_PARSER_MODEL}"]
+    if provider == usage_mod.GIGACHAT:
+        return [f"вопросы: {config.GIGACHAT_MODEL}", f"разбор: {config.GIGACHAT_PARSER_MODEL}"]
+    return [f"вопросы: {config.CLAUDE_MODEL}", f"разбор: {config.CLAUDE_PARSER_MODEL}"]
+
+
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, command: CommandObject) -> None:
     since, until, label = services.parse_period(command.args)
@@ -91,10 +126,8 @@ async def cmd_recipe(message: Message, command: CommandObject) -> None:
 
     await message.bot.send_chat_action(message.chat.id, "typing")
     try:
-        answer, spent = await claude_client.suggest_recipes(
-            services.fridge_as_text(items), command.args
-        )
-    except claude_client.ClaudeError as exc:
+        answer, spent = await llm.suggest_recipes(services.fridge_as_text(items), command.args)
+    except llm.LLMError as exc:
         await message.answer(str(exc))
         return
 
@@ -158,8 +191,8 @@ async def answer_question(message: Message, question: str) -> None:
     await message.bot.send_chat_action(message.chat.id, "typing")
     context = await services.build_context(message.chat.id)
     try:
-        answer, spent = await claude_client.ask(question, context)
-    except claude_client.ClaudeError as exc:
+        answer, spent = await llm.ask(question, context)
+    except llm.LLMError as exc:
         await message.answer(str(exc))
         return
 

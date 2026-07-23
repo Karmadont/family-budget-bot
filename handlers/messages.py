@@ -19,10 +19,10 @@ import time
 from aiogram import F, Router
 from aiogram.types import Message, ReactionTypeEmoji
 
-import claude_client
 import config
 import db
 import images
+import llm
 import services
 from handlers.commands import answer_question
 from models import ParsedMessage
@@ -98,16 +98,15 @@ async def on_text(message: Message) -> None:
         return
 
     try:
-        parsed, spent = await claude_client.parse_message(text, services.today().isoformat())
-    except claude_client.ClaudeError as exc:
+        parsed, spent = await llm.parse_message(text, services.today().isoformat())
+    except llm.LLMError as exc:
         # Настройка сломана. Молчать нельзя — иначе бот просто «не работает»,
         # и непонятно почему. Но и на каждое сообщение отвечать не будем.
         if _may_warn(message.chat.id):
             await message.reply(str(exc))
         return
 
-    if spent is not None:
-        await db.log_usage(message.chat.id, spent)
+    await db.log_usage(message.chat.id, spent)
 
     if not parsed.is_purchase or not parsed.items:
         return
@@ -168,10 +167,10 @@ async def on_photo(message: Message) -> None:
     log.info("Чек: %.0f КБ -> %.0f КБ после подготовки", len(raw) / 1024, len(prepared) / 1024)
 
     try:
-        parsed, spent = await claude_client.parse_receipt(
+        parsed, spent = await llm.parse_receipt(
             prepared, media_type, message.caption, services.today().isoformat()
         )
-    except claude_client.ClaudeError as exc:
+    except llm.LLMError as exc:
         await status.edit_text(str(exc))
         return
 
