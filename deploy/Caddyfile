@@ -1,0 +1,43 @@
+# Caddy — то, что стоит между интернетом и ботом.
+#
+# Нужен он ровно для одного: Telegram открывает мини-приложение только по https
+# с настоящим сертификатом. Caddy получает сертификат от Let's Encrypt сам,
+# при первом запуске, и потом продлевает его без напоминаний.
+#
+# Установка (Ubuntu/Debian):
+#   sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+#   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+#     | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+#   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+#     | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+#   sudo apt update && sudo apt install caddy
+#
+# Дальше положить этот файл в /etc/caddy/Caddyfile, заменив домен на свой,
+# и перезапустить:  sudo systemctl reload caddy
+#
+# Перед этим A-запись домена должна указывать на IP сервера, а порты 80 и 443
+# быть открыты: без них Let's Encrypt не сможет подтвердить владение доменом.
+
+budget.example.com {
+	encode zstd gzip
+
+	# Бот слушает только localhost, поэтому весь внешний трафик приходит сюда.
+	reverse_proxy 127.0.0.1:8080
+
+	# Строгий CSP: страница грузит только свои файлы и скрипт Telegram.
+	# Если в приложение добавится сторонняя библиотека — правьте здесь, иначе
+	# браузер её молча заблокирует.
+	header {
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self'; img-src 'self' data: https:; connect-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org"
+		Referrer-Policy "no-referrer"
+		X-Content-Type-Options "nosniff"
+		# X-Frame-Options здесь намеренно нет: Telegram Desktop и Web открывают
+		# мини-приложение внутри iframe, и DENY его просто сломает. Ограничение
+		# по источникам задано через frame-ancestors выше.
+	}
+
+	log {
+		output file /var/log/caddy/budget.log
+		format console
+	}
+}

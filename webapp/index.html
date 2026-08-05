@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ru" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Бюджет</title>
+  <link rel="stylesheet" href="style.css">
+  <!--
+    Скрипт Telegram обязателен и обязательно с их домена: он даёт объект
+    Telegram.WebApp с темой, подписанными данными пользователя и кнопкой «назад».
+    Подключать его копией со своего сервера нельзя — Telegram обновляет API.
+  -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <h1 id="chat-title">Бюджет</h1>
+  <select id="chat-picker" class="chat-picker" hidden aria-label="Выбрать чат"></select>
+</header>
+
+<!-- Переключатель периода стоит над всем, что он фильтрует, и один на экран. -->
+<nav class="periods" id="periods" role="tablist" aria-label="Период">
+  <button role="tab" data-period="week">Неделя</button>
+  <button role="tab" data-period="month" aria-selected="true">Месяц</button>
+  <button role="tab" data-period="year">Год</button>
+  <button role="tab" data-period="all">Всё</button>
+</nav>
+
+<main id="screen" hidden>
+
+  <section class="hero">
+    <div class="hero-total" id="total">—</div>
+    <div class="hero-sub" id="subtitle"></div>
+    <div class="hero-delta" id="delta" hidden></div>
+  </section>
+
+  <section class="card" id="card-categories">
+    <h2>Категории</h2>
+    <div class="bars" id="categories"></div>
+    <button class="more" id="categories-more" hidden>Показать все</button>
+  </section>
+
+  <section class="card" id="card-timeline">
+    <h2>Динамика</h2>
+    <div class="chart" id="timeline"></div>
+    <p class="caption" id="timeline-caption"></p>
+  </section>
+
+  <section class="card" id="card-top">
+    <!-- Список отсортирован по сумме, а не по числу покупок: заголовок про
+         «чаще всего» здесь был бы неправдой. -->
+    <h2>На что ушло больше всего</h2>
+    <ol class="top" id="top"></ol>
+  </section>
+
+</main>
+
+<div class="state" id="loading">Загружаю…</div>
+
+<div class="state error" id="error" hidden>
+  <p id="error-text"></p>
+  <button id="retry">Попробовать снова</button>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

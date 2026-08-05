@@ -1,0 +1,51 @@
+# systemd-юнит: держит бота запущенным и поднимает его после перезагрузки.
+#
+# Установка:
+#   sudo cp deploy/family-budget-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now family-budget-bot
+#
+# Логи:      journalctl -u family-budget-bot -f
+# Рестарт:   sudo systemctl restart family-budget-bot
+#
+# Пути ниже рассчитаны на то, что проект лежит в /opt/family-budget-bot и
+# запускается от отдельного пользователя. Создать его:
+#   sudo useradd --system --home /opt/family-budget-bot --shell /usr/sbin/nologin budgetbot
+#   sudo chown -R budgetbot:budgetbot /opt/family-budget-bot
+
+[Unit]
+Description=Family budget Telegram bot + Mini App
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=budgetbot
+Group=budgetbot
+WorkingDirectory=/opt/family-budget-bot
+
+# Папка data/ лежит в .gitignore, поэтому после git clone её нет — а ниже стоит
+# ProtectSystem=strict, при котором всё вне ReadWritePaths доступно только на
+# чтение, и создать её сам бот уже не сможет. Префикс '+' выводит эту команду
+# из песочницы, так что каталог появляется до старта.
+ExecStartPre=+/usr/bin/install -d -o budgetbot -g budgetbot /opt/family-budget-bot/data
+ExecStart=/opt/family-budget-bot/.venv/bin/python bot.py
+
+# Падение — не повод останавливаться: сеть отвалилась, Telegram ответил 502.
+Restart=always
+RestartSec=5
+
+# Вывод пишем в журнал systemd, своей ротацией логов заниматься не нужно.
+StandardOutput=journal
+StandardError=journal
+
+# Ограничения на всякий случай: боту нужен только свой каталог и сеть.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Единственное место, куда разрешена запись, — база и временные файлы проекта.
+ReadWritePaths=/opt/family-budget-bot/data
+
+[Install]
+WantedBy=multi-user.target
