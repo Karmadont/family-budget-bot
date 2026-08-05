@@ -1,0 +1,273 @@
+/*
+  style.css — оформление мини-приложения.
+
+  Цвета фона и текста берём из переменных Telegram (--tg-theme-*): клиент
+  подставляет в них тему пользователя, и приложение само становится светлым или
+  тёмным. Запасные значения после запятой нужны, когда страницу открыли в
+  обычном браузере — при разработке это обычное дело.
+
+  Цвет данных (--accent) наоборот задан жёстко: он должен читаться на любой теме,
+  а тему пользователь может поставить какую угодно. Взяты проверенные шаги синего
+  из палитры — оба дают контраст выше 3:1 к фону Telegram, светлому и тёмному.
+*/
+
+:root {
+  --bg:      var(--tg-theme-bg-color, #ffffff);
+  --card:    var(--tg-theme-secondary-bg-color, #f2f2f7);
+  --text:    var(--tg-theme-text-color, #0b0b0b);
+  --hint:    var(--tg-theme-hint-color, #7d7d85);
+  --accent:  #2a78d6;
+  --good:    #006300;
+  --bad:     #d03b3b;
+  --hairline: color-mix(in srgb, var(--hint) 22%, transparent);
+  --radius: 14px;
+}
+
+:root[data-theme="dark"] {
+  --accent: #3987e5;
+  --good:   #0ca30c;
+  --bad:    #e66767;
+}
+
+* { box-sizing: border-box; }
+
+/* Собственный display у элемента сильнее браузерного правила для [hidden],
+   и скрытый блок остался бы видимым. Поэтому правило своё и с !important. */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  padding: 0 16px env(safe-area-inset-bottom);
+  font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* --- шапка --------------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 0 10px;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-picker {
+  margin-left: auto;
+  max-width: 45%;
+  padding: 6px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+/* --- переключатель периода ----------------------------------------------- */
+
+.periods {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.periods button {
+  flex: 1;
+  padding: 7px 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--hint);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+
+.periods button[aria-selected="true"] {
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* --- главная цифра ------------------------------------------------------- */
+
+.hero { padding: 24px 4px 18px; }
+
+.hero-total {
+  font-size: 38px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  /* Крупное одиночное число — пропорциональными цифрами: моноширинные на этом
+     кегле выглядят разреженными. tabular-nums остаётся для колонок. */
+}
+
+.hero-sub {
+  margin-top: 4px;
+  color: var(--hint);
+  font-size: 14px;
+}
+
+.hero-delta {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 3px 9px;
+  border-radius: 100px;
+  background: var(--card);
+  font-size: 13px;
+}
+
+.hero-delta[data-dir="up"]   { color: var(--bad); }
+.hero-delta[data-dir="down"] { color: var(--good); }
+
+/* --- карточки ------------------------------------------------------------ */
+
+main { padding-bottom: 24px; }
+
+.card {
+  margin-top: 14px;
+  padding: 16px;
+  border-radius: var(--radius);
+  background: var(--card);
+}
+
+.card h2 {
+  margin: 0 0 14px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--hint);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.more {
+  width: 100%;
+  margin-top: 12px;
+  padding: 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+/* --- полосы по категориям ------------------------------------------------ */
+/*
+  Категории — величины без естественного порядка, поэтому все полосы одного
+  цвета: длина уже несёт значение, красить её ещё и в разные цвета значило бы
+  сказать одно и то же дважды. Заодно ничего не перекрашивается при смене
+  периода — цвет ни за кем не закреплён.
+*/
+
+.bar-row { padding: 7px 0; }
+
+.bar-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 5px;
+  font-size: 14px;
+}
+
+.bar-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-value {
+  flex: none;
+  font-variant-numeric: tabular-nums;   /* колонка справа — цифры должны совпадать */
+  color: var(--hint);
+}
+
+.bar-track {
+  height: 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--hint) 16%, transparent);
+}
+
+.bar-fill {
+  height: 100%;
+  min-width: 6px;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width .25s ease-out;
+}
+
+/* --- график по дням ------------------------------------------------------ */
+
+.chart svg { display: block; width: 100%; height: auto; }
+
+.chart .bar { fill: var(--accent); cursor: pointer; }
+.chart .bar.dim { fill: color-mix(in srgb, var(--accent) 35%, transparent); }
+.chart .hit { fill: transparent; cursor: pointer; }   /* палец толще столбика */
+
+.chart .axis { fill: var(--hint); font-size: 10px; }
+.chart .rule { stroke: var(--hairline); stroke-width: 1; }
+
+.caption {
+  margin: 10px 0 0;
+  min-height: 18px;
+  color: var(--hint);
+  font-size: 13px;
+}
+
+/* --- топ покупок --------------------------------------------------------- */
+
+.top { margin: 0; padding: 0; list-style: none; }
+
+.top li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  font-size: 15px;
+}
+
+.top li + li { border-top: 1px solid var(--hairline); }
+
+.top .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.top .count { color: var(--hint); font-size: 13px; }
+.top .sum { flex: none; font-variant-numeric: tabular-nums; }
+
+/* --- состояния ----------------------------------------------------------- */
+
+.state {
+  padding: 60px 16px;
+  color: var(--hint);
+  text-align: center;
+}
+
+.state.error { color: var(--text); }
+
+.state button {
+  margin-top: 14px;
+  padding: 9px 18px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--tg-theme-button-color, var(--accent));
+  color: var(--tg-theme-button-text-color, #fff);
+  font: inherit;
+  cursor: pointer;
+}
+
+.empty { padding: 8px 0; color: var(--hint); }
+
+/* Пока грузятся новые данные, старые остаются на месте приглушёнными:
+   подменять их скелетом — значит дёргать вёрстку на каждом переключении. */
+#screen.busy { opacity: .5; transition: opacity .15s; }
