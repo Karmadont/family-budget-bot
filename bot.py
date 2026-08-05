@@ -3,6 +3,11 @@ bot.py — точка входа.
 
 Запуск:  python bot.py
 Остановка: Ctrl+C
+
+В одном процессе живут три вещи: поллинг Telegram, еженедельная рассылка и —
+если задан WEBAPP_URL — веб-сервер мини-приложения. Разносить их по процессам
+нельзя: соединение с SQLite в db.py одно на процесс, и два писателя в один файл
+рано или поздно поймают «database is locked».
 """
 from __future__ import annotations
 
@@ -24,6 +29,7 @@ from handlers import commands_router, messages_router
 log = logging.getLogger(__name__)
 
 BOT_COMMANDS = [
+    BotCommand(command="app", description="Открыть приложение с графиками"),
     BotCommand(command="digest", description="Разбор трат за прошлую неделю"),
     BotCommand(command="stats", description="Расходы по категориям"),
     BotCommand(command="ask", description="Вопрос по покупкам"),
@@ -87,6 +93,18 @@ async def main() -> None:
 
     # Еженедельная рассылка живёт своей фоновой задачей рядом с поллингом.
     digest_task = asyncio.create_task(scheduler.run(bot))
+
+    # Веб-сервер поднимаем, только если приложению есть куда смотреть.
+    web_server = web_task = None
+    if config.WEBAPP_URL:
+        from api.app import create_server  # fastapi нужен только здесь
+
+        web_server = create_server(bot)
+        web_task = asyncio.create_task(web_server.serve())
+        log.info("Мини-приложение: %s", config.WEBAPP_URL)
+    else:
+        log.info("WEBAPP_URL не задан — мини-приложение выключено.")
+
     try:
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
     finally:
@@ -95,6 +113,11 @@ async def main() -> None:
             await digest_task
         except asyncio.CancelledError:
             pass
+        if web_server is not None:
+            # should_exit вместо cancel(): uvicorn успеет доответить на открытые
+            # запросы и закрыть сокет по-человечески.
+            web_server.should_exit = True
+            await web_task
         await bot.session.close()
         await llm.close()
         await db.close()

@@ -289,6 +289,46 @@ async def period_total(chat_id: int, since: str, until: str) -> float:
     return row["total"]
 
 
+async def period_summary(chat_id: int, since: str, until: str) -> tuple[float, int, int]:
+    """Итог периода одним запросом. -> (сумма, позиций, дней с покупками)"""
+    cur = await _db().execute(
+        """
+        SELECT COALESCE(SUM(price), 0) AS total,
+               COUNT(*)               AS items,
+               COUNT(DISTINCT bought_at) AS days
+        FROM purchases
+        WHERE chat_id = ? AND bought_at BETWEEN ? AND ?
+        """,
+        (chat_id, since, until),
+    )
+    row = await cur.fetchone()
+    return row["total"], row["items"], row["days"]
+
+
+async def daily_totals(chat_id: int, since: str, until: str) -> list[tuple[str, float]]:
+    """Суммы по дням для графика. Дни без покупок не возвращаются — их дорисует фронтенд."""
+    cur = await _db().execute(
+        """
+        SELECT bought_at AS day, SUM(price) AS total
+        FROM purchases
+        WHERE chat_id = ? AND bought_at BETWEEN ? AND ?
+        GROUP BY bought_at
+        ORDER BY bought_at
+        """,
+        (chat_id, since, until),
+    )
+    return [(r["day"], r["total"]) for r in await cur.fetchall()]
+
+
+async def first_purchase_date(chat_id: int) -> str | None:
+    """Дата самой ранней покупки — нижняя граница для периода «всё время»."""
+    cur = await _db().execute(
+        "SELECT MIN(bought_at) AS first FROM purchases WHERE chat_id = ?", (chat_id,)
+    )
+    row = await cur.fetchone()
+    return row["first"]
+
+
 async def top_items(chat_id: int, since: str, until: str, limit: int = 10) -> list[tuple[str, float, int]]:
     cur = await _db().execute(
         """

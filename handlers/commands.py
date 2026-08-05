@@ -7,12 +7,13 @@ import logging
 
 from aiogram import Router
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import BufferedInputFile, Message
+from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import config
 import db
 import llm
 import services
+from api.auth import pack_chat
 from models import CATEGORIES
 
 log = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ HELP = """<b>Как мной пользоваться</b>
 <i>бот, сколько мы потратили на мясо в этом месяце?</i>
 
 <b>Статистика</b>
+/app — открыть приложение с графиками
 /digest — разбор трат за прошлую неделю (то, что я присылаю по расписанию)
 /stats — расходы по категориям (<code>/stats неделя</code>, <code>месяц</code>, <code>год</code>, <code>всё</code>, <code>30</code>)
 /ask — вопрос по покупкам (<code>/ask на что ушло больше всего?</code>)
@@ -65,6 +67,35 @@ async def cmd_help(message: Message) -> None:
 @router.message(Command("chatid"))
 async def cmd_chatid(message: Message) -> None:
     await message.answer(f"ID этого чата: <code>{message.chat.id}</code>")
+
+
+@router.message(Command("app", "приложение"))
+async def cmd_app(message: Message) -> None:
+    """
+    Кнопка, открывающая мини-приложение для этого чата.
+
+    Кнопку делаем обычной ссылкой, а не web_app: web_app-кнопки Telegram
+    разрешает только в личной переписке с ботом, а бюджет живёт в группе.
+    Прямая ссылка t.me/<бот>/<приложение> открывает то же самое где угодно, а
+    id чата уезжает в startapp — и приходит на страницу уже внутри подписи.
+    """
+    if not config.WEBAPP_URL:
+        await message.answer(
+            "Мини-приложение не настроено: в .env не задан <code>WEBAPP_URL</code>."
+        )
+        return
+
+    me = await message.bot.me()
+    link = (
+        f"https://t.me/{me.username}/{config.WEBAPP_SHORT_NAME}"
+        f"?startapp={pack_chat(message.chat.id)}"
+    )
+    await message.answer(
+        "<b>Бюджет этого чата</b>\nСтатистика, категории и график трат.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="📊 Открыть", url=link)]]
+        ),
+    )
 
 
 @router.message(Command("categories"))
