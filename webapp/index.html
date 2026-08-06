@@ -19,42 +19,78 @@
   <select id="chat-picker" class="chat-picker" hidden aria-label="Выбрать чат"></select>
 </header>
 
-<!-- Переключатель периода стоит над всем, что он фильтрует, и один на экран. -->
-<nav class="periods" id="periods" role="tablist" aria-label="Период">
-  <button role="tab" data-period="week">Неделя</button>
-  <button role="tab" data-period="month" aria-selected="true">Месяц</button>
-  <button role="tab" data-period="year">Год</button>
-  <button role="tab" data-period="all">Всё</button>
-</nav>
+<div id="app" hidden>
 
-<main id="screen" hidden>
+  <!-- ================= Обзор ================= -->
+  <section class="screen" id="screen-overview">
 
-  <section class="hero">
-    <div class="hero-total" id="total">—</div>
-    <div class="hero-sub" id="subtitle"></div>
-    <div class="hero-delta" id="delta" hidden></div>
+    <!-- Переключатель периода стоит над всем, что он фильтрует, и один на экран. -->
+    <nav class="segmented" id="periods" role="tablist" aria-label="Период">
+      <button role="tab" data-period="week">Неделя</button>
+      <button role="tab" data-period="month" aria-selected="true">Месяц</button>
+      <button role="tab" data-period="year">Год</button>
+      <button role="tab" data-period="all">Всё</button>
+    </nav>
+
+    <div class="hero">
+      <div class="hero-total" id="total">—</div>
+      <div class="hero-sub" id="subtitle"></div>
+      <div class="hero-delta" id="delta" hidden></div>
+    </div>
+
+    <div class="card">
+      <h2>Категории</h2>
+      <div class="bars" id="categories"></div>
+      <button class="more" id="categories-more" hidden></button>
+    </div>
+
+    <div class="card" id="card-timeline">
+      <h2>Динамика</h2>
+      <div class="chart" id="timeline"></div>
+      <p class="caption" id="timeline-caption"></p>
+    </div>
+
+    <div class="card" id="card-top">
+      <!-- Список отсортирован по сумме, а не по числу покупок: заголовок про
+           «чаще всего» здесь был бы неправдой. -->
+      <h2>На что ушло больше всего</h2>
+      <ol class="top" id="top"></ol>
+    </div>
+
   </section>
 
-  <section class="card" id="card-categories">
-    <h2>Категории</h2>
-    <div class="bars" id="categories"></div>
-    <button class="more" id="categories-more" hidden>Показать все</button>
+  <!-- ================= Траты ================= -->
+  <section class="screen" id="screen-spending" hidden>
+
+    <div class="filters">
+      <select id="feed-period" aria-label="Период">
+        <option value="">За всё время</option>
+        <option value="week">За 7 дней</option>
+        <option value="month">Этот месяц</option>
+        <option value="year">Этот год</option>
+      </select>
+      <button id="feed-review" class="chip" aria-pressed="false">Проверить</button>
+    </div>
+    <input id="feed-search" class="search" type="search" placeholder="Поиск по названию"
+           autocomplete="off" aria-label="Поиск по названию">
+
+    <!-- Вопросы, на которые бот ждёт ответа. В чате их можно закрыть reply'ем,
+         здесь — прямо в поле ниже. -->
+    <div id="pending" hidden></div>
+
+    <div id="feed"></div>
+    <button class="more" id="feed-more" hidden>Показать ещё</button>
+
   </section>
 
-  <section class="card" id="card-timeline">
-    <h2>Динамика</h2>
-    <div class="chart" id="timeline"></div>
-    <p class="caption" id="timeline-caption"></p>
-  </section>
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Разделы">
+    <button role="tab" data-screen="overview" aria-selected="true">Обзор</button>
+    <button role="tab" data-screen="spending">
+      Траты<span class="badge" id="review-badge" hidden></span>
+    </button>
+  </nav>
 
-  <section class="card" id="card-top">
-    <!-- Список отсортирован по сумме, а не по числу покупок: заголовок про
-         «чаще всего» здесь был бы неправдой. -->
-    <h2>На что ушло больше всего</h2>
-    <ol class="top" id="top"></ol>
-  </section>
-
-</main>
+</div>
 
 <div class="state" id="loading">Загружаю…</div>
 
@@ -63,6 +99,50 @@
   <button id="retry">Попробовать снова</button>
 </div>
 
-<script src="app.js"></script>
+<!-- ================= Форма правки ================= -->
+<div class="sheet-backdrop" id="sheet" hidden>
+  <form class="sheet" id="edit-form" autocomplete="off">
+    <h2>Запись</h2>
+
+    <label>Название
+      <input name="name" required maxlength="200">
+    </label>
+
+    <div class="pair">
+      <label>Сумма
+        <input name="price" type="number" step="0.01" min="0" required inputmode="decimal">
+      </label>
+      <label>Дата
+        <input name="bought_at" type="date" required>
+      </label>
+    </div>
+
+    <label>Категория
+      <select name="category" required></select>
+    </label>
+
+    <div class="pair">
+      <label>Количество
+        <input name="quantity" type="number" step="0.001" min="0" inputmode="decimal">
+      </label>
+      <label>Единица
+        <input name="unit" maxlength="20" placeholder="шт, кг, л">
+      </label>
+    </div>
+
+    <p class="sheet-source" id="edit-source"></p>
+    <p class="sheet-error" id="edit-error" hidden></p>
+
+    <div class="sheet-actions">
+      <button type="submit" id="edit-save" class="primary">Сохранить</button>
+      <button type="button" id="edit-cancel">Отмена</button>
+    </div>
+    <button type="button" id="edit-delete" class="danger">Удалить запись</button>
+  </form>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script type="module" src="app.js"></script>
 </body>
 </html>

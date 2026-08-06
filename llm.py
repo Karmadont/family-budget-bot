@@ -44,7 +44,8 @@ _OCR_MIME = {"image/jpeg": "JPEG", "image/png": "PNG", "application/pdf": "PDF"}
 
 # Пустой результат — возвращаем его при любой ошибке разбора, чтобы бот не падал в чате.
 _NOT_A_PURCHASE = ParsedMessage(
-    is_purchase=False, store=None, bought_on=None, items=[], total=None, note=None
+    is_purchase=False, store=None, bought_on=None, items=[], total=None,
+    clarify=None, note=None,
 )
 
 _client: httpx.AsyncClient | None = None

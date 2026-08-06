@@ -52,6 +52,10 @@ class PurchaseItem(BaseModel):
     price: float = Field(description="Итоговая стоимость этой позиции целиком (не цена за единицу).")
     is_food: bool = Field(description="true, если это еда или напиток, который можно съесть/выпить.")
     perishable: bool = Field(description="true, если продукт скоропортящийся и хранится в холодильнике.")
+    uncertain: bool = Field(
+        description="true, если категорию или цену пришлось выбирать наугад: непонятное название, "
+        "товар подходит сразу к нескольким категориям. Если всё однозначно — false."
+    )
 
 
 class ParsedMessage(BaseModel):
@@ -64,6 +68,10 @@ class ParsedMessage(BaseModel):
     bought_on: str | None = Field(description="Дата покупки YYYY-MM-DD, если её можно понять из текста ('вчера', '3 марта'). Иначе null.")
     items: list[PurchaseItem] = Field(description="Список позиций. Пустой список, если это не покупка.")
     total: float | None = Field(description="Итоговая сумма, если она явно названа (строка ИТОГО в чеке или сумма в тексте). Иначе null.")
+    clarify: str | None = Field(
+        description="Один короткий вопрос человеку, если о покупке речь, но разобрать её не удалось "
+        "(не названа цена, непонятно за что). Если разобрал — null."
+    )
     note: str | None = Field(description="Короткий комментарий, если что-то осталось непонятным. Иначе null.")
 
 
