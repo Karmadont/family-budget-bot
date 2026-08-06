@@ -71,10 +71,12 @@ def create_server(bot: Bot) -> uvicorn.Server:
             port=config.WEBAPP_PORT,
             log_level=config.LOG_LEVEL.lower(),
             access_log=False,       # свои строчки пишем сами, чужие только шумят
-            # Caddy ходит на localhost и передаёт настоящий адрес клиента в
-            # X-Forwarded-For. Без этого в логах был бы один сплошной 127.0.0.1.
+            # Перед приложением всегда стоит обратный прокси: он держит HTTPS, а
+            # настоящий адрес клиента передаёт в X-Forwarded-For. Без этого в
+            # логах был бы один сплошной адрес прокси. Кому именно верить,
+            # зависит от площадки — см. WEBAPP_TRUSTED_PROXY в config.py.
             proxy_headers=True,
-            forwarded_allow_ips="127.0.0.1",
+            forwarded_allow_ips=config.WEBAPP_TRUSTED_PROXY,
         )
     )
     server.install_signal_handlers = lambda: None
