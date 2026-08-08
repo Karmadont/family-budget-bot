@@ -44,7 +44,8 @@ _OCR_MIME = {"image/jpeg": "JPEG", "image/png": "PNG", "application/pdf": "PDF"}
 
 # Пустой результат — возвращаем его при любой ошибке разбора, чтобы бот не падал в чате.
 _NOT_A_PURCHASE = ParsedMessage(
-    is_purchase=False, store=None, bought_on=None, items=[], total=None, note=None
+    is_purchase=False, store=None, bought_on=None, items=[], total=None,
+    clarify=None, note=None,
 )
 
 _client: httpx.AsyncClient | None = None
@@ -319,11 +320,22 @@ def _http_error(response: httpx.Response) -> LLMError:
     body = response.text[:500]
     log.error("Yandex Cloud вернул %s: %s", response.status_code, body)
 
-    if response.status_code in (401, 403):
+    # 401 и 403 значат разное, и путать их дорого: при 403 ключ верный, и время,
+    # потраченное на его перепроверку, потрачено зря.
+    if response.status_code == 401:
         return LLMError(
-            "Yandex Cloud не принял ключ — проверьте YANDEX_API_KEY и YANDEX_FOLDER_ID "
-            "в .env, а также права сервисного аккаунта (ai.languageModels.user, "
-            "для чеков ещё ai.vision.user)."
+            "Yandex Cloud не узнал ключ. Проверьте YANDEX_API_KEY: он начинается "
+            "с 'AQVN' и это именно секретный ключ, а не его идентификатор."
+        )
+    if response.status_code == 403:
+        return LLMError(
+            "Ключ верный, но прав не хватает.\n"
+            "Роль назначается НА КАТАЛОГ, а не на сам сервисный аккаунт:\n"
+            "консоль Yandex Cloud → нужный каталог → вкладка «Права доступа» → "
+            "«Назначить роли» → выберите свой сервисный аккаунт → роль "
+            "ai.languageModels.user (для чеков ещё ai.vision.user).\n"
+            "Если роль уже там — проверьте область действия API-ключа: нужна "
+            "yc.ai.foundationModels.execute либо ключ без ограничений."
         )
     if response.status_code == 404:
         return LLMError("Такой модели нет — проверьте YANDEX_MODEL в .env.")

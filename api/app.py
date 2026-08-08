@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import config
-from api.auth import AuthError
+from api.auth import AuthError, UpstreamError
 from api.routes import router
 
 log = logging.getLogger(__name__)
@@ -40,6 +40,13 @@ def build_app(bot: Bot) -> FastAPI:
     @app.exception_handler(AuthError)
     async def _auth_failed(request: Request, exc: AuthError) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=403)
+
+    @app.exception_handler(UpstreamError)
+    async def _upstream_down(request: Request, exc: UpstreamError) -> JSONResponse:
+        # 503, а не 403: прав мы не лишали, просто не смогли их выяснить.
+        # Retry-After — намёк клиенту (и промежуточным прокси), что повтор уместен.
+        return JSONResponse({"error": str(exc), "retry": True}, status_code=503,
+                            headers={"Retry-After": "5"})
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> dict:
@@ -71,10 +78,12 @@ def create_server(bot: Bot) -> uvicorn.Server:
             port=config.WEBAPP_PORT,
             log_level=config.LOG_LEVEL.lower(),
             access_log=False,       # свои строчки пишем сами, чужие только шумят
-            # Caddy ходит на localhost и передаёт настоящий адрес клиента в
-            # X-Forwarded-For. Без этого в логах был бы один сплошной 127.0.0.1.
+            # Перед приложением всегда стоит обратный прокси: он держит HTTPS, а
+            # настоящий адрес клиента передаёт в X-Forwarded-For. Без этого в
+            # логах был бы один сплошной адрес прокси. Кому именно верить,
+            # зависит от площадки — см. WEBAPP_TRUSTED_PROXY в config.py.
             proxy_headers=True,
-            forwarded_allow_ips="127.0.0.1",
+            forwarded_allow_ips=config.WEBAPP_TRUSTED_PROXY,
         )
     )
     server.install_signal_handlers = lambda: None

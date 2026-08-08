@@ -7,6 +7,12 @@ data/
 *.db
 *.csv
 
+# Выгрузка чата из Telegram Desktop: это вся переписка семьи целиком.
+# Кладите её куда угодно вне проекта, но если положили внутрь — не улетит.
+result.json
+ChatExport*/
+DataExport*/
+
 # === Python ===
 __pycache__/
 *.py[cod]

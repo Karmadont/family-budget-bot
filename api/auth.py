@@ -34,6 +34,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.utils.web_app import WebAppInitData, safe_parse_webapp_init_data
 
 import config
+import retry
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +53,16 @@ _SIG_LEN = 16
 
 class AuthError(Exception):
     """Запрос не прошёл проверку. Текст уходит клиенту как есть."""
+
+
+class UpstreamError(Exception):
+    """
+    Telegram не ответил, и прав мы не знаем.
+
+    Отдельный тип нужен, чтобы не выдавать обрыв связи за отказ в доступе. Разница
+    для человека принципиальная: «нет прав» — это тупик, а «связь подвела» — повод
+    нажать «попробовать снова». Клиенту уходит 503, а не 403.
+    """
 
 
 # --- ссылка на чат ----------------------------------------------------------
@@ -126,7 +137,14 @@ def parse_init_data(raw: str) -> WebAppInitData:
 
 
 async def is_member(bot: Bot, chat_id: int, user_id: int) -> bool:
-    """Состоит ли пользователь в чате. Ответ кешируется на MEMBERSHIP_TTL секунд."""
+    """
+    Состоит ли пользователь в чате. Ответ кешируется на MEMBERSHIP_TTL секунд.
+
+    Кешируется только ответ Telegram. Если Telegram не ответил, бросаем
+    UpstreamError: запомнить обрыв связи как «доступа нет» значило бы закрыть
+    человеку приложение на пять минут из-за секундной сетевой заминки — ровно это
+    и происходило, пока обе ситуации обрабатывались одинаково.
+    """
     key = (chat_id, user_id)
     cached = _membership.get(key)
     now = time.monotonic()
@@ -134,13 +152,21 @@ async def is_member(bot: Bot, chat_id: int, user_id: int) -> bool:
         return cached[1]
 
     try:
-        member = await bot.get_chat_member(chat_id, user_id)
-        allowed = member.status in MEMBER_STATUSES
+        member = await retry.call(
+            lambda: bot.get_chat_member(chat_id, user_id,
+                                        request_timeout=int(config.TELEGRAM_TIMEOUT)),
+            what=f"getChatMember({chat_id}, {user_id})",
+        )
+    except retry.TRANSIENT as exc:
+        raise UpstreamError("Telegram сейчас не отвечает — попробуйте ещё раз") from exc
     except TelegramAPIError as exc:
-        # Чата нет, бота из него выгнали, id чужой — во всех случаях доступа нет.
-        log.info("getChatMember(%s, %s) не удался: %s", chat_id, user_id, exc)
-        allowed = False
+        # А это уже ответ Telegram, просто отрицательный: чата нет, бота из него
+        # выгнали, id чужой. Доступа нет, и запомнить это можно.
+        log.info("getChatMember(%s, %s) отказано: %s", chat_id, user_id, exc)
+        _membership[key] = (now + MEMBERSHIP_TTL, False)
+        return False
 
+    allowed = member.status in MEMBER_STATUSES
     _membership[key] = (now + MEMBERSHIP_TTL, allowed)
     return allowed
 
