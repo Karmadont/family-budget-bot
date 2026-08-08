@@ -70,10 +70,12 @@ async def chat_title(bot: Bot, chat_id: int) -> str:
     if cached is not None and now < cached[0]:
         return cached[1]
     try:
-        info = await bot.get_chat(chat_id)
+        info = await bot.get_chat(chat_id, request_timeout=int(config.TELEGRAM_TIMEOUT))
         title = info.title or info.full_name or str(chat_id)
     except TelegramAPIError:
-        title = "Чат"
+        # Название — украшение, из-за него экран отдавать не будем. Но и запоминать
+        # заглушку на час нельзя: связь восстановится, а «Чат» останется висеть.
+        return "Чат"
     _titles[chat_id] = (now + _TITLE_TTL, title)
     return title
 

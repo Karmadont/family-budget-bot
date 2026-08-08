@@ -24,13 +24,16 @@ import re
 import time
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject
+from aiogram.methods import TelegramMethod
 from aiogram.types import Message, ReactionTypeEmoji
 
 import config
 import db
 import images
 import llm
+import retry
 import services
 from handlers.commands import answer_question
 from models import ParsedMessage
@@ -120,6 +123,11 @@ async def on_text(message: Message) -> None:
     if len(text) > MAX_TEXT_LEN:
         return
     if not HAS_DIGIT.search(text) and not BUY_HINT.search(text):
+        return
+
+    # Обе проверки стоят до вызова модели: повтор нужно отсечь раньше, чем за его
+    # разбор будут списаны деньги.
+    if await _skip_duplicate(message, text):
         return
 
     try:
@@ -339,7 +347,7 @@ async def _save(
 
     # Для фото уже висит сообщение «Читаю чек…» — его и правим.
     if status is not None:
-        await status.edit_text(_confirm_text(parsed))
+        await _deliver(message, status.edit_text(_confirm_text(parsed)), what="разбор чека")
         return
 
     # Молчаливые режимы отменяются, если есть что проверить: беззвучно записать
@@ -355,7 +363,90 @@ async def _save(
             except Exception:  # noqa: BLE001 — реакции доступны не во всех чатах
                 log.debug("Не удалось поставить реакцию, отвечаю текстом")
 
-    await message.reply(_confirm_text(parsed))
+    await _deliver(message, message.reply(_confirm_text(parsed)), what="подтверждение покупки")
+
+
+async def _deliver(message: Message, method: TelegramMethod, *, what: str) -> None:
+    """
+    Довести сообщение до чата, переживая обрывы связи.
+
+    Покупка к этому моменту уже в базе, и уронить обработчик из-за недоставленного
+    подтверждения было бы худшим из вариантов: деньги учтены, человек об этом не
+    знает, а в логах трейсбек вместо внятной строчки.
+
+    Если не дошло даже после повторов — не страшно. Человек напишет то же самое
+    ещё раз, `_skip_duplicate` узнает повтор, второй записи не будет, а
+    подтверждение уйдёт заново.
+    """
+    try:
+        await retry.send(message.bot, method, what=what)
+    except TelegramAPIError as exc:
+        log.warning("chat=%s не доставил %s: %s", message.chat.id, what, exc)
+
+
+# --- защита от повторной записи ----------------------------------------------
+
+async def _skip_duplicate(message: Message, text: str) -> bool:
+    """
+    Отсечь повторную запись той же покупки. -> True, если сообщение пропущено.
+
+    Повторы бывают двух видов, и реакция на них разная.
+
+    Апдейт прислал заново сам Telegram — так бывает, когда бот не успел
+    подтвердить получение из-за обрыва связи. Человек ничего не делал и
+    подтверждение уже видел: молчим, иначе в чате появится второе «Записал».
+
+    Человек написал то же самое сам — почти наверняка потому, что подтверждения
+    не увидел. Второй раз записывать нельзя, а вот показать, что покупка на месте,
+    как раз и нужно: именно за этим он и пришёл.
+    """
+    chat_id = message.chat.id
+
+    if await db.message_saved(chat_id, message.message_id):
+        log.info("chat=%s апдейт для сообщения %s уже обработан — пропускаю",
+                 chat_id, message.message_id)
+        return True
+
+    twin = await db.recent_twin(chat_id, text, config.DUPLICATE_WINDOW_MIN)
+    if twin is None:
+        return False
+
+    rows = await db.rows_for_message(chat_id, twin)
+    log.info("chat=%s сообщение повторяет %s (%s поз.) — переотправляю подтверждение",
+             chat_id, twin, len(rows))
+    await _deliver(message, message.reply(_repeat_text(rows)), what="повторное подтверждение")
+    return True
+
+
+def _item_line(name: str, quantity: float | None, unit: str | None,
+               price: float, category: str, uncertain: bool) -> str:
+    """Строка одной позиции. Одна на два подтверждения — из разбора и из базы."""
+    qty = f"{quantity:g} {unit}".strip() if quantity is not None else ""
+    qty_part = f" ({services.esc(qty)})" if qty else ""
+    # Знак вопроса у позиции = категорию или цену модель выбрала наугад.
+    mark = " ❓" if uncertain else ""
+    return (f"• {services.esc(name)}{qty_part} — {services.money(price)}"
+            f" <i>{services.esc(category)}</i>{mark}")
+
+
+def _repeat_text(rows: list[db.Purchase]) -> str:
+    """Подтверждение, собранное из уже записанных строк, — ответ на повтор."""
+    total = sum(row.price for row in rows)
+    store = next((row.store for row in rows if row.store), None)
+    header = f"✅ Это уже записано: {len(rows)} поз. на {services.money(total)}"
+    if store:
+        header += f" · {services.esc(store)}"
+
+    lines = [header]
+    lines += [_item_line(row.name, row.quantity, row.unit, row.price,
+                         row.category, row.needs_review)
+              for row in rows[:CONFIRM_ITEM_LIMIT]]
+    hidden = len(rows) - CONFIRM_ITEM_LIMIT
+    if hidden > 0:
+        lines.append(f"<i>…и ещё {hidden} поз.</i>")
+    lines.append("<i>Повторно не записал. Если это правда вторая такая покупка — "
+                 f"добавьте её через {config.DUPLICATE_WINDOW_MIN} мин. или напишите иначе.</i>")
+    return "\n".join(lines)
 
 
 def _confirm_text(parsed: ParsedMessage) -> str:
@@ -364,17 +455,11 @@ def _confirm_text(parsed: ParsedMessage) -> str:
     header = f"✅ Записал {len(parsed.items)} поз. на {services.money(total)}"
     if parsed.store:
         header += f" · {services.esc(parsed.store)}"
-    lines = [header]
 
-    for item in parsed.items[:CONFIRM_ITEM_LIMIT]:
-        qty = f"{item.quantity:g} {item.unit}".strip() if item.quantity is not None else ""
-        qty_part = f" ({services.esc(qty)})" if qty else ""
-        # Знак вопроса у позиции = категорию или цену модель выбрала наугад.
-        mark = " ❓" if item.uncertain else ""
-        lines.append(
-            f"• {services.esc(item.name)}{qty_part} — {services.money(item.price)}"
-            f" <i>{services.esc(item.category)}</i>{mark}"
-        )
+    lines = [header]
+    lines += [_item_line(item.name, item.quantity, item.unit, item.price,
+                         item.category, item.uncertain)
+              for item in parsed.items[:CONFIRM_ITEM_LIMIT]]
     hidden = len(parsed.items) - CONFIRM_ITEM_LIMIT
     if hidden > 0:
         lines.append(f"<i>…и ещё {hidden} поз.</i>")

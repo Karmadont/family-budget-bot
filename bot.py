@@ -18,11 +18,13 @@ from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BotCommand, Message
 
 import config
 import db
 import llm
+import retry
 import scheduler
 from handlers import commands_router, messages_router
 
@@ -82,14 +84,30 @@ async def main() -> None:
     dispatcher.include_router(commands_router)
     dispatcher.include_router(messages_router)
 
-    me = await bot.me()
+    # Первый же вызов идёт в Telegram, и на нестабильной связи он может не дойти.
+    # Без повтора процесс на этом падал: контейнер перезапускался хостингом и
+    # всё равно поднимался, но каждый такой круг — минута, когда бот не работает.
+    me = await retry.call(
+        lambda: bot.get_me(request_timeout=int(config.TELEGRAM_TIMEOUT)),
+        what="проверка токена при старте",
+        attempts=max(config.TELEGRAM_RETRIES, 5),
+    )
     log.info("Запущен как @%s (модель: %s)", me.username, config.YANDEX_MODEL)
     if not config.ALLOWED_CHAT_IDS:
         log.warning("ALLOWED_CHAT_IDS пуст — бот ответит в любом чате, куда его добавили.")
     if config.WEEKLY_DIGEST and not config.ALLOWED_CHAT_IDS:
         log.info("Дайджест придёт во все чаты, где записаны покупки.")
 
-    await bot.set_my_commands(BOT_COMMANDS)
+    # Меню команд — украшение: оно уже установлено с прошлого запуска и живёт на
+    # стороне Telegram. Ронять из-за него бота нельзя.
+    try:
+        await retry.call(
+            lambda: bot.set_my_commands(BOT_COMMANDS,
+                                        request_timeout=int(config.TELEGRAM_TIMEOUT)),
+            what="обновление меню команд",
+        )
+    except TelegramAPIError as exc:
+        log.warning("Меню команд не обновилось: %s. Работаю дальше.", exc)
 
     # Еженедельная рассылка живёт своей фоновой задачей рядом с поллингом.
     digest_task = asyncio.create_task(scheduler.run(bot))

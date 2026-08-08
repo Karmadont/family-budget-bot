@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import config
-from api.auth import AuthError
+from api.auth import AuthError, UpstreamError
 from api.routes import router
 
 log = logging.getLogger(__name__)
@@ -40,6 +40,13 @@ def build_app(bot: Bot) -> FastAPI:
     @app.exception_handler(AuthError)
     async def _auth_failed(request: Request, exc: AuthError) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=403)
+
+    @app.exception_handler(UpstreamError)
+    async def _upstream_down(request: Request, exc: UpstreamError) -> JSONResponse:
+        # 503, а не 403: прав мы не лишали, просто не смогли их выяснить.
+        # Retry-After — намёк клиенту (и промежуточным прокси), что повтор уместен.
+        return JSONResponse({"error": str(exc), "retry": True}, status_code=503,
+                            headers={"Retry-After": "5"})
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> dict:

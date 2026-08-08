@@ -121,6 +121,26 @@ def author_id(raw: dict) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def expected_chat_ids(info: dict) -> list[int]:
+    """
+    Каким мог бы быть chat_id этого чата с точки зрения бота.
+
+    В выгрузке id лежит без знака, а Telegram отдаёт боту отрицательный: у
+    обычной группы это -<id>, у супергруппы и канала — -100<id>. Личная
+    переписка остаётся положительной. Возвращаем все правдоподобные варианты,
+    чтобы предупредить об опечатке, но не мешать, если человек знает лучше.
+    """
+    raw = info.get("id")
+    if not isinstance(raw, int):
+        return []
+    kind = str(info.get("type", ""))
+    if "supergroup" in kind or "channel" in kind:
+        return [int(f"-100{raw}")]
+    if "group" in kind:
+        return [-raw]
+    return [raw]
+
+
 def looks_like_purchase(text: str) -> bool:
     """Тот же дешёвый фильтр, что в боте: цифры либо слово о покупке."""
     if not text or len(text) > MAX_TEXT_LEN:
@@ -248,16 +268,33 @@ async def run(args: argparse.Namespace) -> int:
     print(f"Выгрузка: {info['name']!r} (id {info['id']}, тип {info['type']})")
     print(f"Всего записей в файле: {info['total']}")
     print(f"Похожи на покупку: {len(candidates)}")
-    if info["id"] and str(args.chat_id) not in (str(info["id"]), f"-100{info['id']}"):
-        print(f"\n⚠️  Вы указали --chat-id {args.chat_id}, а в выгрузке id {info['id']}.")
-        print("   Для супергрупп у бота id выглядит как -100<id из выгрузки>.")
-        print("   Если чат не тот, покупки уедут в чужую статистику. Проверьте /chatid в чате.")
+
+    plausible = expected_chat_ids(info)
+    if plausible and args.chat_id not in plausible:
+        print(f"\n⚠️  Вы указали --chat-id {args.chat_id}, а по выгрузке ожидался "
+              f"{' или '.join(str(one) for one in plausible)}.")
+        print("   В выгрузке id лежит без знака, а бот видит его отрицательным:")
+        print("   у обычной группы это -<id>, у супергруппы и канала -100<id>.")
+        print("   Точный ответ даёт команда /chatid в самом чате.")
+        print("   Если чат не тот, покупки уедут в чужую статистику.")
 
     if not candidates:
         print("\nРазбирать нечего.")
         return 0
 
     await db.init()
+    try:
+        return await _import(args, candidates)
+    finally:
+        # Закрываем всегда, в том числе на ранних выходах. Соединение aiosqlite
+        # держит фоновый поток, и без close() процесс печатает результат и
+        # повисает — именно так вёл себя --dry-run.
+        await db.close()
+        await llm.close()
+
+
+async def _import(args: argparse.Namespace, candidates: list[Candidate]) -> int:
+    """Сверка с базой, оценка, подтверждение и сам разбор."""
     known = await db.known_message_ids(args.chat_id)
     fresh = [item for item in candidates if item.message_id not in known]
     skipped = len(candidates) - len(fresh)
@@ -322,8 +359,6 @@ async def run(args: argparse.Namespace) -> int:
         print(f"\nСообщения о покупках без цены выписаны в {report} — "
               "их можно дописать в чат руками.")
 
-    await db.close()
-    await llm.close()
     return 0
 
 

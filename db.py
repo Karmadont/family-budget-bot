@@ -101,6 +101,13 @@ LATE_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_purchases_review ON purchases (chat_id, needs_review);
 """
 
+# Индексы под защиту от повторной записи. Обе колонки существуют с первого
+# релиза, поэтому их можно создавать вместе с остальной схемой.
+DEDUP_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_purchases_chat_msg     ON purchases (chat_id, message_id);
+CREATE INDEX IF NOT EXISTS idx_purchases_chat_created ON purchases (chat_id, created_at);
+"""
+
 # Колонки, добавленные после первого релиза: (таблица, имя, определение).
 # ALTER TABLE ADD COLUMN в SQLite не умеет IF NOT EXISTS, поэтому сверяемся с PRAGMA.
 ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
@@ -209,6 +216,7 @@ async def init() -> None:
     # потом строить индексы, которые на эти колонки ссылаются.
     await _add_missing_columns()
     await _conn.executescript(LATE_INDEXES)
+    await _conn.executescript(DEDUP_INDEXES)
     await _conn.commit()
 
 
@@ -342,6 +350,66 @@ async def save_parsed(
     )
     await _db().commit()
     return len(rows)
+
+
+async def message_saved(chat_id: int, message_id: int | None) -> bool:
+    """
+    Записано ли уже что-нибудь по этому сообщению.
+
+    Telegram пересылает апдейт заново, если бот не успел подтвердить его получение
+    — а при обрывах связи это ровно то, что происходит. Без проверки одна и та же
+    покупка попала бы в статистику дважды, и ещё дважды был бы оплачен разбор.
+    """
+    if message_id is None:
+        return False
+    cur = await _db().execute(
+        "SELECT 1 FROM purchases WHERE chat_id = ? AND message_id = ? LIMIT 1",
+        (chat_id, message_id),
+    )
+    return await cur.fetchone() is not None
+
+
+def _normalized(text: str) -> str:
+    """Текст без разницы в регистре и пробелах — для сравнения двух сообщений."""
+    return " ".join(text.lower().split())
+
+
+async def recent_twin(chat_id: int, raw_text: str, within_min: int) -> int | None:
+    """
+    Найти недавнюю запись с тем же текстом. -> message_id или None.
+
+    Это второй слой защиты, для случая, когда повторяется не Telegram, а человек:
+    подтверждение не дошло, он решил, что бот не услышал, и написал то же самое
+    ещё раз. Сообщение новое, message_id другой, а покупка та же.
+
+    Окно нарочно короткое: купить молоко дважды за день — обычное дело, дважды за
+    десять минут и теми же словами — почти наверняка повтор.
+    """
+    if within_min <= 0:
+        return None
+    since = (dt.datetime.now(config.TIMEZONE) - dt.timedelta(minutes=within_min))
+    cur = await _db().execute(
+        """
+        SELECT message_id, raw_text FROM purchases
+        WHERE chat_id = ? AND created_at >= ? AND message_id IS NOT NULL
+        ORDER BY id DESC
+        """,
+        (chat_id, since.isoformat(timespec="seconds")),
+    )
+    needle = _normalized(raw_text)
+    for row in await cur.fetchall():
+        if row["raw_text"] and _normalized(row["raw_text"]) == needle:
+            return row["message_id"]
+    return None
+
+
+async def rows_for_message(chat_id: int, message_id: int) -> list[Purchase]:
+    """Позиции, записанные по одному сообщению — чтобы переслать подтверждение."""
+    cur = await _db().execute(
+        "SELECT * FROM purchases WHERE chat_id = ? AND message_id = ? ORDER BY id",
+        (chat_id, message_id),
+    )
+    return [Purchase.from_row(row) for row in await cur.fetchall()]
 
 
 async def known_message_ids(chat_id: int) -> set[int]:
